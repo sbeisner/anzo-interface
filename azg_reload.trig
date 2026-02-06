@@ -1,0 +1,9 @@
+@prefix : <http://cambridgesemantics.com/ontologies/Graphmarts#> .
+@prefix system: <http://openanzo.org/ontologies/2008/07/System#> .
+
+<urn://reloadRequest> {
+    <urn://reloadRequest> a :GqeReloadRequest ;
+        system:datasource <{AZG_URI}> ;
+        :forceReload "true"^^<http://www.w3.org/2001/XMLSchema#boolean> ;
+    .
+}
