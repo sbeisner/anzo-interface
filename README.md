@@ -2,6 +2,18 @@
 
 Python interface for Altair Graph Studio (Anzo) - programmatically manage graphmarts, layers, and steps without requiring the AGS UI.
 
+## 🚀 Quick Navigation
+
+| I want to... | Go to... |
+|--------------|----------|
+| **Get started quickly** | [GETTING_STARTED.md](GETTING_STARTED.md) ⭐ |
+| **Run monitoring examples** | [examples/](examples/) → [monitor_all.py](examples/monitor_all.py) |
+| **Deploy backend service** (for full metrics) | [examples/backend_service/](examples/backend_service/) |
+| **Understand file structure** | [FILE_STRUCTURE.md](FILE_STRUCTURE.md) |
+| **See API documentation** | Continue reading below |
+
+---
+
 ## Overview
 
 This module provides a REST API client for Altair Graph Studio (also known as Anzo) that enables automation of common administrative tasks:
