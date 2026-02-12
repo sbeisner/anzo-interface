@@ -189,6 +189,139 @@ The example demonstrates:
 5. Continuous monitoring with alert callbacks
 6. Waiting for graphmart readiness
 
+## Infrastructure Monitoring
+
+The `infrastructure_monitoring` module provides infrastructure-level monitoring for capabilities that ARE available through the AGS REST API, and documents what is NOT available.
+
+### What IS Available via REST API ✓
+
+| Component | Availability | Method |
+|-----------|-------------|---------|
+| **Elasticsearch Connectivity** | ✓ Indirect | Inferred from layer/step failures containing ES-related errors |
+| **AnzoGraph Connectivity** | ✓ Direct | Via graphmart activation status and AZG URI |
+| **LDAP Authentication** | ✓ Indirect | Tested via authentication attempts and response time |
+| **Graphmart Health** | ✓ Direct | Via status endpoints with layer/step details |
+
+### What is NOT Available via REST API ✗
+
+The following metrics require external monitoring tools (JMX, OS tools, APM):
+
+| Metric | Recommended Approach |
+|--------|---------------------|
+| **AnzoGraph Bandwidth** | Network monitoring tools (Prometheus node_exporter, Datadog) |
+| **JVM Memory Utilization** | JMX monitoring (JConsole, VisualVM, Prometheus JMX Exporter) |
+| **CPU Utilization** | OS-level monitoring (top, htop) or APM tools |
+| **Query Performance** | AnzoGraph query logs, SPARQL endpoint timing |
+| **Network Bandwidth** | Network monitoring (iftop, SNMP, cloud provider metrics) |
+| **Disk I/O** | OS tools (iostat, iotop) or Prometheus node_exporter |
+
+### Custom Backend Service Solution ⭐
+
+**If you can deploy a backend service** on the Anzo server or in the same environment, you can access **ALL** the missing metrics! See [BACKEND_SERVICE_GUIDE.md](BACKEND_SERVICE_GUIDE.md) for:
+
+- ✅ **Full implementation** - Python Flask service that exposes all infrastructure metrics
+- ✅ **Direct JVM metrics** - Heap usage, GC stats via local JMX access
+- ✅ **Network bandwidth** - Real-time interface statistics
+- ✅ **Direct ES health** - Cluster status, shard counts, node stats
+- ✅ **LDAP group validation** - Direct LDAP queries for group membership
+- ✅ **CPU, Disk, Connections** - Full OS-level metrics
+
+**Quick Example:**
+```python
+from backend_monitoring_client import BackendMonitoringClient
+
+# Connect to your deployed backend service
+client = BackendMonitoringClient("http://anzo-server:9090")
+
+# Get JVM metrics (direct access)
+jvm = client.get_jvm_metrics()
+print(f"Heap: {jvm.heap_utilization_pct}%")
+
+# Get direct Elasticsearch health
+es = client.get_elasticsearch_health()
+print(f"ES Status: {es.status}, Nodes: {es.number_of_nodes}")
+
+# Check LDAP group membership
+ldap = client.check_ldap_group("jsmith", "anzo-admins")
+print(f"Is member: {ldap.is_member}")
+
+# Print full summary
+client.print_summary()
+```
+
+See [backend_monitoring_client.py](backend_monitoring_client.py) for the Python client integration.
+
+### Infrastructure Monitoring Example
+
+```python
+from pyanzo_interface import GraphmartManagerApi
+from pyanzo_interface.infrastructure_monitoring import (
+    check_elasticsearch_connectivity,
+    check_anzograph_connectivity,
+    check_ldap_authentication,
+    run_infrastructure_health_check
+)
+
+api = GraphmartManagerApi(server="anzo.example.com", username="admin", password="pw")
+
+# Check Elasticsearch (indirect - via layer status)
+es_report = check_elasticsearch_connectivity(api, "http://example.org/graphmart/prod")
+if not es_report.is_healthy:
+    print(f"ES Issues: {es_report.error_messages}")
+
+# Check AnzoGraph connectivity
+azg_report = check_anzograph_connectivity(api, "http://example.org/graphmart/prod")
+print(f"AZG Connected: {azg_report.is_connected}")
+
+# Check LDAP authentication
+ldap_report = check_ldap_authentication(
+    server="anzo.example.com",
+    username="testuser",
+    password="testpass"
+)
+print(f"LDAP Auth: {ldap_report.is_authenticated} ({ldap_report.response_time_ms}ms)")
+
+# Comprehensive check
+results = run_infrastructure_health_check(
+    api,
+    graphmart_uris=["http://example.org/graphmart/gm1", "http://example.org/graphmart/gm2"]
+)
+print(f"Overall Healthy: {results['overall_healthy']}")
+```
+
+### Running Infrastructure Monitoring Examples
+
+```bash
+# Comprehensive infrastructure monitoring examples
+python infrastructure_monitor_example.py
+```
+
+### External Monitoring Setup Recommendations
+
+For metrics not available via REST API, integrate AGS with:
+
+1. **JMX Monitoring** (Memory, GC, Threads)
+   - Enable JMX on Anzo server (port 1099)
+   - Use Prometheus JMX Exporter, JConsole, or VisualVM
+   - Monitor MBeans: `java.lang:type=Memory`, `java.lang:type=GarbageCollector`
+
+2. **OS-Level Monitoring** (CPU, Disk, Network)
+   - Prometheus node_exporter
+   - Datadog agent
+   - New Relic infrastructure agent
+
+3. **Network Monitoring** (Bandwidth, Throughput)
+   - SNMP monitoring for network switches
+   - Cloud provider network metrics (AWS CloudWatch, Azure Monitor)
+   - NetFlow/sFlow for traffic analysis
+
+4. **Query Performance**
+   - Enable AnzoGraph query logging
+   - Parse logs for slow queries
+   - Monitor SPARQL endpoint response times
+
+See `infrastructure_monitoring.print_external_monitoring_guidance()` for detailed recommendations.
+
 ## Common Use Cases
 
 ### Restart AnzoGraph Lakehouse and Reload Graphmart

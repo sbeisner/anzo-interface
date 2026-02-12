@@ -18,11 +18,22 @@ from .monitoring_hooks import (
     monitor_graphmarts,
     wait_for_graphmart_ready,
 )
+from .infrastructure_monitoring import (
+    AnzoGraphConnectionReport,
+    ElasticsearchHealthReport,
+    LDAPHealthReport,
+    check_anzograph_connectivity,
+    check_elasticsearch_connectivity,
+    check_ldap_authentication,
+    print_external_monitoring_guidance,
+    run_infrastructure_health_check,
+)
 
 __version__ = "1.0.0"
 __all__ = [
     "GraphmartManagerApi",
     "GraphmartManagerApiException",
+    # Monitoring hooks
     "ArtifactStatus",
     "GraphmartStatusReport",
     "LayerStatusReport",
@@ -32,4 +43,13 @@ __all__ = [
     "get_layer_status",
     "monitor_graphmarts",
     "wait_for_graphmart_ready",
+    # Infrastructure monitoring
+    "AnzoGraphConnectionReport",
+    "ElasticsearchHealthReport",
+    "LDAPHealthReport",
+    "check_anzograph_connectivity",
+    "check_elasticsearch_connectivity",
+    "check_ldap_authentication",
+    "print_external_monitoring_guidance",
+    "run_infrastructure_health_check",
 ]
