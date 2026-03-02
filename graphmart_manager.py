@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import urllib.parse
+import uuid
 from datetime import timedelta
 from typing import Optional, Union
 
@@ -46,6 +47,35 @@ class GraphmartManagerApi:
     REFRESH = 'refresh'
     RELOAD = 'reload'
     LAYERS = 'layers'
+
+    CANCEL_QUERY_SERVICE_URI = 'http://openanzo.org/semanticServices/datasources#cancelQuery'
+    INFLIGHT_QUERIES_SPARQL = """
+SELECT ?operationId ?datasource
+FROM <http://cambridgesemantics.com/datasource/SystemTables/InflightQueries>
+WHERE {
+    ?query <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ;
+           <http://openanzo.org/ontologies/2008/07/System#datasource> ?datasource .
+}
+""".strip()
+
+    CANCEL_PAYLOAD_TEMPLATE = """\
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix system: <http://openanzo.org/ontologies/2008/07/System#> .
+@prefix anzo: <http://openanzo.org/ontologies/2008/07/Anzo#> .
+@prefix ld: <http://cambridgesemantics.com/ontologies/2009/05/LinkedData#> .
+@prefix graphmart: <http://cambridgesemantics.com/ontologies/Graphmarts#> .
+
+<http://serviceRequest{request_uuid}> {{
+    <http://serviceRequest{request_uuid}> a system:DatasourceRequest ;
+        system:datasource <{datasource_uri}> ;
+        system:operationId "{operation_id}" .
+}}"""
 
     def __init__(
         self,
@@ -351,3 +381,175 @@ class GraphmartManagerApi:
         logger.debug(f'Updating step: {step_uri}')
         self._send_patch(op_type=2, uri=step_uri, data=data)
         time.sleep(self.SLEEP_TIME)
+
+    # -------------------------------------------------------------------------
+    # In-Flight Query Cancellation
+    # -------------------------------------------------------------------------
+
+    def _send_sparql(self, query: str) -> dict:
+        """Execute a SPARQL SELECT query against the Anzo SPARQL endpoint.
+
+        Args:
+            query: SPARQL SELECT query string.
+
+        Returns:
+            Parsed SPARQL JSON response dict.
+
+        Raises:
+            requests.exceptions.HTTPError: On non-2xx responses.
+        """
+        url = f'{self.prefix}://{self.server}:{self.port}/sparql'
+        response = requests.get(
+            url,
+            params={'query': query},
+            headers={'accept': 'application/sparql-results+json'},
+            auth=HTTPBasicAuth(self.username, self.password),
+            timeout=self.REQUEST_TIMEOUT,
+            verify=self.verify_ssl
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _build_cancel_payload(self, datasource_uri: str, operation_id: str) -> str:
+        """Build the TriG payload required by the cancelQuery semantic service.
+
+        Each payload uses a freshly generated UUID so concurrent cancellation
+        requests do not collide in the semantic service queue.
+
+        Args:
+            datasource_uri: The datasource URI returned by get_inflight_queries().
+            operation_id: The operationId returned by get_inflight_queries().
+
+        Returns:
+            TriG-formatted string ready for POST.
+        """
+        request_uuid = str(uuid.uuid4())
+        return self.CANCEL_PAYLOAD_TEMPLATE.format(
+            request_uuid=request_uuid,
+            datasource_uri=datasource_uri,
+            operation_id=operation_id,
+        )
+
+    def get_inflight_queries(self) -> list[dict]:
+        """Return all currently executing queries from the Anzo system tables.
+
+        Queries the InflightQueries system graph via SPARQL and returns a list
+        of dicts, each containing ``operationId`` and ``datasource`` strings
+        that can be passed directly to :meth:`cancel_query`.
+
+        Returns:
+            List of dicts with keys ``operationId`` and ``datasource``.
+            Returns an empty list when no queries are in flight.
+
+        Raises:
+            requests.exceptions.HTTPError: On SPARQL endpoint errors.
+
+        Example::
+
+            queries = api.get_inflight_queries()
+            for q in queries:
+                print(q['operationId'], q['datasource'])
+        """
+        logger.debug('Fetching in-flight queries from system tables')
+        result = self._send_sparql(self.INFLIGHT_QUERIES_SPARQL)
+        bindings = result.get('results', {}).get('bindings', [])
+        queries = [
+            {
+                'operationId': b['operationId']['value'],
+                'datasource': b['datasource']['value'],
+            }
+            for b in bindings
+        ]
+        logger.info(f'Found {len(queries)} in-flight query/queries')
+        return queries
+
+    def cancel_query(self, datasource_uri: str, operation_id: str) -> None:
+        """Cancel a single in-flight query via the Anzo semantic service.
+
+        Constructs a uniquely-named TriG payload and POSTs it to the
+        ``cancelQuery`` semantic service endpoint.  Requires sysadmin
+        privileges; raises :class:`GraphmartManagerApiException` if the
+        caller lacks permission or the query has already completed.
+
+        Args:
+            datasource_uri: Datasource URI of the running query
+                (from :meth:`get_inflight_queries`).
+            operation_id: Operation ID of the running query
+                (from :meth:`get_inflight_queries`).
+
+        Raises:
+            GraphmartManagerApiException: If cancellation is rejected
+                (e.g. insufficient privileges, query already finished).
+            requests.exceptions.HTTPError: On unexpected HTTP errors.
+
+        Example::
+
+            queries = api.get_inflight_queries()
+            if queries:
+                q = queries[0]
+                api.cancel_query(q['datasource'], q['operationId'])
+        """
+        logger.info(f'Cancelling query operationId={operation_id} on datasource={datasource_uri}')
+        payload = self._build_cancel_payload(datasource_uri, operation_id)
+        url = f'{self.prefix}://{self.server}:{self.port}/semantic-services'
+        try:
+            response = requests.post(
+                url,
+                params={'uri': self.CANCEL_QUERY_SERVICE_URI},
+                headers={
+                    'Content-Type': 'application/trig',
+                    'Accept': 'application/json',
+                },
+                data=payload.encode('utf-8'),
+                auth=HTTPBasicAuth(self.username, self.password),
+                timeout=self.REQUEST_TIMEOUT,
+                verify=self.verify_ssl
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else 'unknown'
+            if status_code == 403:
+                raise GraphmartManagerApiException(
+                    f'Permission denied cancelling query {operation_id}: sysadmin privileges required'
+                ) from e
+            raise GraphmartManagerApiException(
+                f'Failed to cancel query {operation_id}: HTTP {status_code}'
+            ) from e
+        logger.info(f'Successfully cancelled query operationId={operation_id}')
+
+    def cancel_all_inflight_queries(self) -> int:
+        """Cancel every currently executing query.
+
+        Convenience wrapper that chains :meth:`get_inflight_queries` and
+        :meth:`cancel_query`.  Cancellation errors for individual queries are
+        logged but do not abort the remaining cancellations.
+
+        Returns:
+            Number of queries successfully cancelled.
+
+        Raises:
+            requests.exceptions.HTTPError: If the initial SPARQL fetch fails.
+
+        Example::
+
+            cancelled = api.cancel_all_inflight_queries()
+            print(f'Cancelled {cancelled} queries')
+        """
+        queries = self.get_inflight_queries()
+        if not queries:
+            logger.info('No in-flight queries to cancel')
+            return 0
+
+        cancelled = 0
+        for q in queries:
+            try:
+                self.cancel_query(
+                    datasource_uri=q['datasource'],
+                    operation_id=q['operationId'],
+                )
+                cancelled += 1
+            except (GraphmartManagerApiException, requests.exceptions.HTTPError) as e:
+                logger.error(f'Could not cancel query {q["operationId"]}: {e}')
+
+        logger.info(f'Cancelled {cancelled}/{len(queries)} in-flight queries')
+        return cancelled

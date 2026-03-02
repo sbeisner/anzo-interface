@@ -144,6 +144,70 @@ GraphmartManagerApi(
 | `get_step_details(step_uri, query)` | Get detailed step information |
 | `update_step(step_uri, data)` | Update step configuration |
 
+### In-Flight Query Cancellation
+
+| Method | Description |
+|--------|-------------|
+| `get_inflight_queries()` | List all currently executing queries (operationId + datasource) |
+| `cancel_query(datasource_uri, operation_id)` | Cancel a specific in-flight query |
+| `cancel_all_inflight_queries()` | Cancel every currently executing query; returns count cancelled |
+
+> **Requires sysadmin privileges.** `cancel_query` raises `GraphmartManagerApiException` if the
+> caller lacks permission or the target query has already finished.
+
+#### How Query Cancellation Works
+
+Cancellation is a two-step process handled transparently by these methods:
+
+1. **Fetch** — `get_inflight_queries()` runs a SPARQL SELECT against the
+   `InflightQueries` system graph to retrieve the `operationId` and datasource
+   URI of every running query.
+2. **Cancel** — `cancel_query()` builds a uniquely-named TriG payload and
+   POSTs it to the Anzo `cancelQuery` semantic service endpoint.
+
+#### Examples
+
+```python
+from pyanzo_interface import GraphmartManagerApi
+
+api = GraphmartManagerApi(
+    server="anzo.example.com",
+    username="sysadmin",
+    password="password"
+)
+
+# --- List in-flight queries ---
+queries = api.get_inflight_queries()
+for q in queries:
+    print(f"operationId={q['operationId']}  datasource={q['datasource']}")
+
+# --- Cancel one specific query ---
+api.cancel_query(
+    datasource_uri=queries[0]['datasource'],
+    operation_id=queries[0]['operationId'],
+)
+
+# --- Cancel ALL in-flight queries ---
+cancelled = api.cancel_all_inflight_queries()
+print(f"Cancelled {cancelled} queries")
+```
+
+#### Error Handling
+
+```python
+from pyanzo_interface import GraphmartManagerApi, GraphmartManagerApiException
+import requests
+
+try:
+    api.cancel_query(datasource_uri, operation_id)
+except GraphmartManagerApiException as e:
+    # Raised for permission denied (403) or query already finished
+    print(f"Cancellation failed: {e}")
+except requests.exceptions.HTTPError as e:
+    # Raised for unexpected HTTP errors from the semantic service
+    print(f"HTTP error: {e}")
+```
+
 ## Monitoring Hooks
 
 The `monitoring_hooks` module provides convenient functions for monitoring artifact status and health. These are useful for:
@@ -203,16 +267,103 @@ The example demonstrates:
 
 ## Infrastructure Monitoring
 
-The `infrastructure_monitoring` module provides infrastructure-level monitoring for capabilities that ARE available through the AGS REST API, and documents what is NOT available.
+### AnzoGraph Connectivity & Performance
+
+`anzograph_monitoring.py` talks directly to AnzoGraph's SPARQL endpoints to
+validate reachability and measure query performance.
+
+**Available via AnzoGraph SPARQL endpoints ✓**
+
+| Function | Endpoint used | Description |
+|----------|--------------|-------------|
+| `check_anzograph_liveness(host, port)` | `GET /sparql` (back-end port 7070) | Is AnzoGraph accepting queries? |
+| `measure_anzograph_latency(host, port, num_probes)` | `GET /sparql` (back-end port 7070) | Round-trip query latency (min/median/max/stdev) across N probes |
+| `measure_anzograph_throughput(host, port, row_limit)` | `GET /sparql` (back-end port 7070) | Rows/second for a bounded result-set query |
+
+> **Back-end port 7070 requires no authentication** and bypasses Anzo's
+> gateway, giving a clean measurement of the Anzo→AZG network path.
+
+```python
+from anzograph_monitoring import (
+    check_anzograph_liveness,
+    measure_anzograph_latency,
+    measure_anzograph_throughput,
+)
+
+liveness = check_anzograph_liveness("azg-host.example.com")
+print(f"Alive: {liveness.is_alive}  ({liveness.response_time_ms:.1f}ms)")
+
+latency = measure_anzograph_latency("azg-host.example.com", num_probes=10)
+print(f"Median latency: {latency.median_ms:.1f}ms  stdev: {latency.stdev_ms:.1f}ms")
+
+throughput = measure_anzograph_throughput("azg-host.example.com", row_limit=10_000)
+print(f"Throughput: {throughput.rows_per_second:,.0f} rows/sec")
+```
+
+**NOT available without a backend sidecar per AZG node ✗**
+
+| Metric | Why | Alternative |
+|--------|-----|-------------|
+| **Per-node / per-worker memory** | AZG management uses gRPC (port 5600), not REST. No public endpoint exists. | Deploy `psutil` sidecar on each node — see [BACKEND_SERVICE_GUIDE.md](BACKEND_SERVICE_GUIDE.md) |
+| **True intra-cluster interconnect bandwidth** | The Admin Console has a network benchmark but it is UI-only with no API equivalent. | OS-level tools (`iftop`, Prometheus `node_exporter`) on each AZG node |
+
+Run the example: `python examples/check_anzograph.py`
+
+---
+
+### Elasticsearch Direct Validation
+
+`elasticsearch_monitoring.py` validates ES connectivity by calling the
+Elasticsearch HTTP API directly — no Anzo involved.
+
+**Available via Elasticsearch REST API ✓**
+
+| Function | ES endpoint | Description |
+|----------|------------|-------------|
+| `check_cluster_health(host, port)` | `GET /_cluster/health` | Status (green/yellow/red), node counts, shard distribution |
+| `check_node_memory(host, port)` | `GET /_nodes/stats/jvm,os` | Per-node JVM heap and OS memory for every node in the cluster |
+| `check_indices(host, port, index_filter)` | `GET /_cat/indices` + `GET /<index>/_count` | Index health, document counts, and query validation |
+| `validate_elasticsearch_connectivity(...)` | All of the above | Single call that runs all checks and returns a composite report |
+
+```python
+from elasticsearch_monitoring import validate_elasticsearch_connectivity
+
+report = validate_elasticsearch_connectivity(
+    host="es-host.example.com",
+    port=9200,
+    index_filter="anzo",    # only validate indices matching this substring
+)
+
+print(f"Reachable: {report.is_reachable}")
+print(f"Cluster: {report.cluster_health.cluster_name} — {report.cluster_health.status}")
+print(f"Unassigned shards: {report.cluster_health.unassigned_shards}")
+
+for node in report.nodes.nodes:
+    print(f"  {node.node_name}: heap {node.heap_used_pct:.1f}%  "
+          f"OS mem {node.os_used_pct:.1f}%")
+
+for idx in report.indices:
+    ok = "✓" if idx.is_queryable else "✗"
+    print(f"  {ok} {idx.index}: {idx.health}  {idx.doc_count:,} docs")
+
+print(f"Overall healthy: {report.overall_healthy}")
+```
+
+Run the example: `python examples/check_elasticsearch.py`
+
+---
 
 ### What IS Available via REST API ✓
 
 | Component | Availability | Method |
 |-----------|-------------|---------|
-| **Elasticsearch Connectivity** | ✓ Indirect | Inferred from layer/step failures containing ES-related errors |
-| **AnzoGraph Connectivity** | ✓ Direct | Via graphmart activation status and AZG URI |
-| **LDAP Authentication** | ✓ Indirect | Tested via authentication attempts and response time |
-| **Graphmart Health** | ✓ Direct | Via status endpoints with layer/step details |
+| **Elasticsearch Connectivity** | ✓ Indirect (via Anzo) | Layer/step failures in graphmart status |
+| **Elasticsearch Connectivity** | ✓ **Direct** | `elasticsearch_monitoring.validate_elasticsearch_connectivity()` |
+| **AnzoGraph Liveness** | ✓ Direct | `anzograph_monitoring.check_anzograph_liveness()` via SPARQL port |
+| **AnzoGraph Latency** | ✓ Direct | `anzograph_monitoring.measure_anzograph_latency()` via SPARQL port |
+| **AnzoGraph via graphmart** | ✓ Direct | `infrastructure_monitoring.check_anzograph_connectivity()` |
+| **LDAP Authentication** | ✓ Indirect | `infrastructure_monitoring.check_ldap_authentication()` |
+| **Graphmart Health** | ✓ Direct | `monitoring_hooks.check_graphmart_status()` |
 
 ### What is NOT Available via REST API ✗
 
@@ -220,6 +371,8 @@ The following metrics require external monitoring tools (JMX, OS tools, APM):
 
 | Metric | Recommended Approach |
 |--------|---------------------|
+| **AZG per-node memory** | Backend sidecar with `psutil` on each AZG node (see [BACKEND_SERVICE_GUIDE.md](BACKEND_SERVICE_GUIDE.md)) |
+| **AZG intra-cluster bandwidth** | OS-level: `iftop`, Prometheus `node_exporter` on each AZG node |
 | **AnzoGraph Bandwidth** | Network monitoring tools (Prometheus node_exporter, Datadog) |
 | **JVM Memory Utilization** | JMX monitoring (JConsole, VisualVM, Prometheus JMX Exporter) |
 | **CPU Utilization** | OS-level monitoring (top, htop) or APM tools |
