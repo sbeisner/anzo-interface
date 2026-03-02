@@ -49,6 +49,18 @@ class GraphmartManagerApi:
     LAYERS = 'layers'
 
     CANCEL_QUERY_SERVICE_URI = 'http://openanzo.org/semanticServices/datasources#cancelQuery'
+    AZG_RELOAD_SERVICE_URI = 'http://openanzo.org/semanticServices/gqe#reload'
+
+    AZG_RELOAD_PAYLOAD_TEMPLATE = """\
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix system: <http://openanzo.org/ontologies/2008/07/System#> .
+@prefix graphmarts: <http://cambridgesemantics.com/ontologies/Graphmarts#> .
+
+<urn://reloadRequest{request_uuid}> {{
+    <urn://reloadRequest{request_uuid}> a graphmarts:GqeReloadRequest ;
+        system:datasource <{azg_uri}> ;
+        graphmarts:forceReload "{force_reload}"^^xsd:boolean .
+}}"""
     INFLIGHT_QUERIES_SPARQL = """
 SELECT ?operationId ?datasource
 FROM <http://cambridgesemantics.com/datasource/SystemTables/InflightQueries>
@@ -553,3 +565,142 @@ WHERE {
 
         logger.info(f'Cancelled {cancelled}/{len(queries)} in-flight queries')
         return cancelled
+
+    # -------------------------------------------------------------------------
+    # AnzoGraph Cluster Restart
+    # -------------------------------------------------------------------------
+
+    def _build_azg_reload_payload(self, azg_uri: str, force_reload: bool = True) -> str:
+        """Build the TriG payload for a GqeReloadRequest.
+
+        Based on the azg_reload.trig template.  A UUID is injected into the
+        named graph URI so concurrent requests do not collide in the semantic
+        service queue.
+
+        Args:
+            azg_uri:      URI of the AnzoGraph datasource to restart.
+            force_reload: If True, issues a full forced reload (default: True).
+
+        Returns:
+            TriG-formatted string ready for POST to the semantic service.
+        """
+        return self.AZG_RELOAD_PAYLOAD_TEMPLATE.format(
+            request_uuid=str(uuid.uuid4()),
+            azg_uri=azg_uri,
+            force_reload='true' if force_reload else 'false',
+        )
+
+    def restart_anzograph(
+        self,
+        azg_uri: str,
+        graphmart_uris: Optional[list[str]] = None,
+        deactivate_timeout: int = 120,
+        ready_timeout: int = 1800,
+    ) -> None:
+        """Restart a specific AnzoGraph cluster and bring graphmarts back online.
+
+        Executes the full safe restart sequence:
+
+        1. **Deactivate** all supplied graphmarts from the AZG datasource so
+           that in-flight queries can drain and no new queries are routed to
+           the cluster during restart.
+        2. **Send** a ``GqeReloadRequest`` TriG payload to the semantic
+           service endpoint, triggering AnzoGraph to restart.
+        3. **Reactivate** each graphmart against the same AZG datasource URI
+           and block until it is Online and complete.
+
+        Args:
+            azg_uri:           URI of the AnzoGraph datasource to restart
+                               (e.g. ``http://host/datasource/AnzoGraph``).
+            graphmart_uris:    List of graphmart URIs currently connected to
+                               this AZG.  Each will be deactivated before the
+                               restart and reactivated afterward.  Pass an
+                               empty list or ``None`` to restart without
+                               touching graphmarts (use with caution).
+            deactivate_timeout: Per-graphmart timeout in seconds for the
+                                deactivate call (default: 120).
+            ready_timeout:     Per-graphmart timeout in seconds when waiting
+                               for each graphmart to come back online after
+                               reactivation (default: 1800 = 30 minutes).
+
+        Raises:
+            GraphmartManagerApiException: If the semantic service call fails or
+                a graphmart does not come back online within ``ready_timeout``.
+            requests.exceptions.HTTPError: On unexpected HTTP errors.
+
+        Example::
+
+            api.restart_anzograph(
+                azg_uri="http://anzograph-host/datasource/AnzoGraph",
+                graphmart_uris=[
+                    "http://cambridgesemantics.com/graphmart/gm1",
+                    "http://cambridgesemantics.com/graphmart/gm2",
+                ],
+            )
+        """
+        graphmart_uris = graphmart_uris or []
+
+        # ------------------------------------------------------------------
+        # Step 1 — Deactivate graphmarts
+        # ------------------------------------------------------------------
+        if graphmart_uris:
+            logger.info(
+                f'Deactivating {len(graphmart_uris)} graphmart(s) before AZG restart'
+            )
+            for gm_uri in graphmart_uris:
+                title = self.get_title(graphmart_uri=gm_uri)
+                logger.info(f'  Deactivating: {title}')
+                self.deactivate(graphmart_uri=gm_uri, timeout=deactivate_timeout)
+            logger.info('All graphmarts deactivated')
+
+        # ------------------------------------------------------------------
+        # Step 2 — Send GqeReloadRequest to semantic service
+        # ------------------------------------------------------------------
+        logger.info(f'Sending AZG restart request for datasource: {azg_uri}')
+        payload = self._build_azg_reload_payload(azg_uri=azg_uri, force_reload=True)
+        url = f'{self.prefix}://{self.server}:{self.port}/semantic-services'
+        try:
+            response = requests.post(
+                url,
+                params={'uri': self.AZG_RELOAD_SERVICE_URI},
+                headers={
+                    'Content-Type': 'application/trig',
+                    'Accept': 'application/json',
+                },
+                data=payload.encode('utf-8'),
+                auth=HTTPBasicAuth(self.username, self.password),
+                timeout=self.REQUEST_TIMEOUT,
+                verify=self.verify_ssl,
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else 'unknown'
+            if status_code == 403:
+                raise GraphmartManagerApiException(
+                    'Permission denied sending AZG restart: sysadmin privileges required'
+                ) from e
+            raise GraphmartManagerApiException(
+                f'AZG restart request failed: HTTP {status_code}'
+            ) from e
+
+        logger.info('AZG restart request accepted — AnzoGraph is restarting')
+
+        # ------------------------------------------------------------------
+        # Step 3 — Reactivate graphmarts and wait for each to be ready
+        # ------------------------------------------------------------------
+        if graphmart_uris:
+            logger.info(
+                f'Reactivating {len(graphmart_uris)} graphmart(s) against {azg_uri}'
+            )
+            for gm_uri in graphmart_uris:
+                title = self.get_title(graphmart_uri=gm_uri)
+                logger.info(f'  Activating: {title}')
+                self.activate(graphmart_uri=gm_uri, azg_uri=azg_uri)
+                self.block_until_ready(
+                    graphmart_uri=gm_uri,
+                    timeout=ready_timeout,
+                    extra_message=f'AZG restart: graphmart {title} did not come back online.',
+                )
+                logger.info(f'  {title} is back online')
+
+        logger.info('AZG restart complete — all graphmarts are online')

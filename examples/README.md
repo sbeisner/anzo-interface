@@ -9,6 +9,9 @@ examples/
 ├── README.md                           # This file
 ├── monitor_all.py                      # Comprehensive monitoring example
 ├── quick_health_check.py               # Simple health check for cron/CI
+├── check_anzograph.py                  # AZG latency / throughput check
+├── check_elasticsearch.py              # ES cluster health / index check
+├── restart_anzograph.py                # Safe AZG cluster restart
 │
 └── backend_service/                    # Backend service for full metrics
     ├── README.md                       # Deployment instructions
@@ -124,6 +127,90 @@ ERROR: ✗ Production Graphmart: failed - 3 layer(s) failed
 ERROR: ✗ Analytics Graphmart: AnzoGraph not connected - Graphmart is Offline
 ✗ Health check failed - see errors above
 ```
+
+---
+
+### [check_anzograph.py](check_anzograph.py) - AnzoGraph Connectivity Check
+
+**Purpose:** Validate the Anzo→AnzoGraph communication path directly via the AZG SPARQL endpoint
+
+**What it checks:**
+- SPARQL endpoint liveness (port 7070, no auth)
+- Query round-trip latency (min/median/mean/max/stdev over N probes)
+- Result-set delivery throughput (rows/second)
+
+**When to use:**
+- Diagnosing slow queries that may be AZG-related
+- Confirming AZG is reachable before a graphmart operation
+- Pre-restart health snapshot
+
+**Example output:**
+```
+1. ANZOGRAPH SPARQL ENDPOINT LIVENESS
+✓  AnzoGraph is alive at azg-host:7070  (12.3ms)
+
+2. QUERY ROUND-TRIP LATENCY
+   Probes completed: 10/10
+   Median : 11.45 ms
+   ✓  Latency is within acceptable range.
+
+3. RESULT-SET DELIVERY THROUGHPUT
+   Rows fetched  : 10,000
+   Throughput    : 45,231 rows/sec
+```
+
+---
+
+### [check_elasticsearch.py](check_elasticsearch.py) - Elasticsearch Connectivity Check
+
+**Purpose:** Direct validation of an Elasticsearch cluster using the ES REST API
+
+**What it checks:**
+- Cluster health status (green/yellow/red)
+- Per-node JVM heap and OS memory usage
+- Index health and queryability
+
+**When to use:**
+- Diagnosing ES-related graphmart layer failures
+- Verifying ES connectivity after network changes
+- Pre-deployment validation
+
+**Example output:**
+```
+CLUSTER HEALTH
+  Cluster 'anzo-es': green  (3 nodes, 0 unassigned shards)
+
+NODE MEMORY
+  Node         Heap Used  Heap Max  Heap %   OS Mem %
+  es-node-1    2,048 MB   4,096 MB   50.0%    62.3%
+  es-node-2    1,920 MB   4,096 MB   46.9%    58.1%
+
+INDEX VALIDATION
+  Index                Health  Docs      Queryable
+  anzo-journal-2024    green   1,234,567  ✓
+```
+
+---
+
+### [restart_anzograph.py](restart_anzograph.py) - Safe AZG Cluster Restart
+
+**Purpose:** Safely restart an AnzoGraph cluster with automatic graphmart deactivation and reactivation
+
+**What it does:**
+1. Deactivates all configured graphmarts (drains in-flight queries)
+2. POSTs a `GqeReloadRequest` to the AGS semantic service
+3. Reactivates each graphmart and waits until fully Online
+
+**When to use:**
+- AZG cluster is unresponsive or stuck
+- Applying AZG configuration changes that require a restart
+- Recovering from a failed graphmart activation
+
+**Important:** Cancel any in-flight queries first with `cancel_all_inflight_queries()` to avoid data loss.
+
+**Exit codes:**
+- `0` - Restart completed, all graphmarts online
+- `1` - Restart failed (see log output)
 
 ---
 

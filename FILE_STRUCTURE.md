@@ -24,6 +24,9 @@ pyanzo_interface/
 │   ├── examples/README.md          # Examples documentation
 │   ├── examples/monitor_all.py     # Comprehensive monitoring demo
 │   ├── examples/quick_health_check.py  # Simple health check for cron
+│   ├── examples/check_anzograph.py     # AZG latency / throughput check
+│   ├── examples/check_elasticsearch.py # ES cluster health / index check
+│   ├── examples/restart_anzograph.py   # Safe AZG cluster restart
 │   │
 │   └── examples/backend_service/   # Backend service deployment
 │       ├── README.md               # Deployment guide
