@@ -93,14 +93,29 @@ api.block_until_ready(graphmart_uri, timeout=600)
 
 ```python
 GraphmartManagerApi(
-    server: str,           # Anzo server hostname or IP
-    username: str,         # Authentication username
-    password: str,         # Authentication password
-    port: str = '8443',    # Server port
-    https: bool = True,    # Use HTTPS (True) or HTTP (False)
-    verify_ssl: bool = False  # Verify SSL certificates
+    server: str,              # Anzo server hostname or IP
+    username: str,            # Authentication username
+    password: str,            # Authentication password
+    port: str = '8443',       # Server port (default 8443; use '443' for standard HTTPS)
+    https: bool = True,       # Use HTTPS (True) or HTTP (False)
+    verify_ssl: bool = False, # Verify SSL certificates
+    api_version: str = '',    # API version: '' for Anzo 5.4.2+ including 5.4.15 (default), 'v1' for Anzo 5.4.1 only
 )
 ```
+
+> **Anzo version compatibility**: Anzo 5.4.1 exposes REST endpoints under `/api/v1/`, while
+> Anzo 5.4.2 and later (including 5.4.15+) use `/api/` — the default.  You only need
+> `api_version='v1'` for the specific 5.4.1 release.
+>
+> ```python
+> # Anzo 5.4.2+ including 5.4.15  (default — no api_version needed)
+> api = GraphmartManagerApi(server='anzo.example.com', username='admin', password='pass',
+>                           port='443')
+>
+> # Anzo 5.4.1 only
+> api = GraphmartManagerApi(server='anzo.example.com', username='admin', password='pass',
+>                           port='443', api_version='v1')
+> ```
 
 ### Graphmart Lifecycle Operations
 
@@ -128,9 +143,10 @@ GraphmartManagerApi(
 |--------|-------------|
 | `graphmart_layers(graphmart_uri)` | Get all layers in a graphmart |
 | `create_layer(graphmart_uri, layer_config)` | Create a new layer |
+| `create_layer_step(layer_uri, step_config)` | Create a new QueryStep in a layer |
 | `move_layer(graphmart_uri, target, position, before)` | Move layer before/after another |
-| `enable_layers(graphmart_uri, layer_uris, steps=True)` | Enable layers (optionally with steps) |
-| `disable_layers(graphmart_uri, layer_uris, steps=True)` | Disable layers (optionally with steps) |
+| `enable_layers(graphmart_uri, layer_uris, steps=True)` | Enable layers (optionally with steps); pass `layer_uris=None` for all |
+| `disable_layers(graphmart_uri, layer_uris, steps=True)` | Disable layers (optionally with steps); pass `layer_uris=None` for all |
 | `layer_steps(layer_uri)` | Get all steps in a layer |
 
 ### Step Management
@@ -154,6 +170,11 @@ GraphmartManagerApi(
 
 > **Requires sysadmin privileges.** `cancel_query` raises `GraphmartManagerApiException` if the
 > caller lacks permission or the target query has already finished.
+>
+> **Deployment note**: `get_inflight_queries()` uses a SPARQL `FROM` clause to query the
+> `InflightQueries` system named graph.  Some Anzo deployments restrict this access on the
+> standard `/sparql` endpoint and will return HTTP 400.  If you encounter this error, a
+> `GraphmartManagerApiException` is raised with an explanatory message.
 
 #### How Query Cancellation Works
 

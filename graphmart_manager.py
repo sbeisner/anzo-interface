@@ -63,12 +63,19 @@ class GraphmartManagerApi:
 }}"""
     INFLIGHT_QUERIES_SPARQL = """
 SELECT ?operationId ?datasource
-FROM <http://cambridgesemantics.com/datasource/SystemTables/InflightQueries>
 WHERE {
     ?query <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ;
            <http://openanzo.org/ontologies/2008/07/System#datasource> ?datasource .
 }
 """.strip()
+
+    # Linked dataset catalog entry for Anzo system tables (AnzoXray @ SystemTables).
+    # Used by get_inflight_queries() via /sparql/lds/{encoded_uri}.
+    SYSTEM_TABLES_LDS_URI = (
+        'http://openanzo.org/catEntry('
+        '%5Bhttp%3A%2F%2Fcambridgesemantics.com%2Fontologies%2F2009%2F05%2FLinkedData%23AnzoXray%5D'
+        '%40%5Bhttp%3A%2F%2Fcambridgesemantics.com%2Fdatasource%2FSystemTables%5D)'
+    )
 
     CANCEL_PAYLOAD_TEMPLATE = """\
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -96,7 +103,8 @@ WHERE {
         password: str,
         port: str = '8443',
         https: bool = True,
-        verify_ssl: bool = False
+        verify_ssl: bool = False,
+        api_version: str = '',
     ):
         """
         Initialize the Graphmart Manager API client.
@@ -108,6 +116,17 @@ WHERE {
             port: Server port (default: '8443').
             https: Use HTTPS if True, HTTP if False (default: True).
             verify_ssl: Verify SSL certificates (default: False for self-signed certs).
+            api_version: API version path segment. Leave empty (default) for Anzo 5.4.2+
+                which uses ``/api/``. Set to ``'v1'`` for Anzo 5.4.1 which uses ``/api/v1/``.
+
+        Example::
+
+            # Anzo 5.4.2+ (default)
+            api = GraphmartManagerApi(server='anzo.example.com', username='admin', password='pass')
+
+            # Anzo 5.4.1
+            api = GraphmartManagerApi(server='anzo.example.com', username='admin', password='pass',
+                                      api_version='v1')
         """
         self.server = server
         self.username = username
@@ -115,6 +134,8 @@ WHERE {
         self.port = port
         self.prefix = 'https' if https else 'http'
         self.verify_ssl = verify_ssl
+        # Build the API base path: '/api/' for 5.4.2+, '/api/v1/' for 5.4.1
+        self._api_base = f'/api/{api_version}/' if api_version else '/api/'
 
     def _send_get(
         self,
@@ -123,8 +144,8 @@ WHERE {
         endpoint: Optional[str] = None,
         query: Optional[str] = None
     ) -> requests.Response:
-        url = f'{self.prefix}://{self.server}:{self.port}/api/{self.OPERATION_TYPE[op_type]}/' \
-              f'{urllib.parse.quote_plus(uri)}'
+        url = (f'{self.prefix}://{self.server}:{self.port}{self._api_base}'
+               f'{self.OPERATION_TYPE[op_type]}/{urllib.parse.quote_plus(uri)}')
         if endpoint:
             url += f'/{endpoint}'
         if query:
@@ -149,8 +170,8 @@ WHERE {
         data: Optional[dict] = None,
         timeout: Optional[int] = None
     ) -> requests.Response:
-        url = f'{self.prefix}://{self.server}:{self.port}/api/{self.OPERATION_TYPE[op_type]}/' \
-              f'{urllib.parse.quote_plus(uri)}'
+        url = (f'{self.prefix}://{self.server}:{self.port}{self._api_base}'
+               f'{self.OPERATION_TYPE[op_type]}/{urllib.parse.quote_plus(uri)}')
         if endpoint:
             url += f'/{endpoint}'
         if query:
@@ -184,28 +205,22 @@ WHERE {
         endpoint: Optional[str] = None,
         data: Optional[Union[dict, list]] = None
     ) -> requests.Response:
-        url = f'{self.prefix}://{self.server}:{self.port}/api/{self.OPERATION_TYPE[op_type]}/' \
-              f'{urllib.parse.quote_plus(uri)}'
+        url = (f'{self.prefix}://{self.server}:{self.port}{self._api_base}'
+               f'{self.OPERATION_TYPE[op_type]}/{urllib.parse.quote_plus(uri)}')
         if endpoint:
             url += f'/{endpoint}'
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
-        if data:
-            response = requests.patch(
-                url,
-                headers=headers,
-                auth=HTTPBasicAuth(self.username, self.password),
-                data=json.dumps(data),
-                timeout=self.REQUEST_TIMEOUT,
-                verify=self.verify_ssl
-            )
-        else:
-            response = requests.patch(
-                url,
-                headers=headers,
-                auth=HTTPBasicAuth(self.username, self.password),
-                timeout=self.REQUEST_TIMEOUT,
-                verify=self.verify_ssl
-            )
+        # Use `is not None` so that an explicit None serialises as JSON `null`
+        # (meaning "apply to all") and an empty list serialises as `[]`.
+        # This matches the API contract for enable/disable bulk operations.
+        response = requests.patch(
+            url,
+            headers=headers,
+            auth=HTTPBasicAuth(self.username, self.password),
+            data=json.dumps(data) if data is not None else None,
+            timeout=self.REQUEST_TIMEOUT,
+            verify=self.verify_ssl
+        )
         response.raise_for_status()
         return response
 
@@ -328,6 +343,57 @@ WHERE {
         return self._send_post(op_type=0, uri=graphmart_uri, endpoint=self.LAYERS,
                                data=layer_configuration).json()['uri']
 
+    def create_layer_step(self, layer_uri: str, step_config: dict) -> str:
+        """Create a new transformation step in a layer.
+
+        Posts a step configuration to ``/api/layers/{uri}/steps``.
+        The ``type`` field must be present and set to ``'QueryStep'``.
+
+        Args:
+            layer_uri: URI of the layer to add the step to.
+            step_config: Step configuration dict.  Required keys:
+
+                - ``type`` (str): Must be ``'QueryStep'``.
+                - ``title`` (str): Human-readable name for the step.
+                - ``transformQuery`` (str): SPARQL INSERT/DELETE query.
+
+                Optional keys:
+
+                - ``source`` (list[str]): Source dataset URIs, e.g.
+                  ``["http://cambridgesemantics.com/ontologies/Graphmarts#AllPrevious"]``.
+                - ``stepModel`` (str): Ontology URI for the step model.
+
+        Returns:
+            URI of the newly created step.
+
+        Raises:
+            ValueError: If ``type`` is missing or not ``'QueryStep'``.
+            requests.exceptions.HTTPError: On API errors.
+
+        Example::
+
+            step_uri = api.create_layer_step(
+                layer_uri="http://cambridgesemantics.com/Layer/abc123",
+                step_config={
+                    "type": "QueryStep",
+                    "title": "Load Products",
+                    "transformQuery": (
+                        "INSERT { GRAPH ${targetGraph} { ?s ?p ?o } }\\n"
+                        "${usingSources}\\n"
+                        "WHERE { ?s ?p ?o }"
+                    ),
+                    "source": [
+                        "http://cambridgesemantics.com/ontologies/Graphmarts#AllPrevious",
+                    ],
+                }
+            )
+        """
+        if step_config.get('type') != 'QueryStep':
+            raise ValueError("step_config 'type' must be 'QueryStep'")
+        logger.debug(f'Creating step on layer: {layer_uri}')
+        return self._send_post(op_type=1, uri=layer_uri, endpoint='steps',
+                               data=step_config).json()['uri']
+
     def move_layer(self, graphmart_uri: str, target_layer: str, position_layer: str, before: bool) -> None:
         place = 'before' if before else 'after'
         logger.debug(f'Moving layer {target_layer} {place} {position_layer}')
@@ -398,11 +464,15 @@ WHERE {
     # In-Flight Query Cancellation
     # -------------------------------------------------------------------------
 
-    def _send_sparql(self, query: str) -> dict:
+    def _send_sparql(self, query: str, lds_uri: Optional[str] = None) -> dict:
         """Execute a SPARQL SELECT query against the Anzo SPARQL endpoint.
 
         Args:
             query: SPARQL SELECT query string.
+            lds_uri: Optional linked dataset catalog entry URI. When provided,
+                the query is sent to ``/sparql/lds/{encoded_uri}`` which allows
+                querying system tables and other LDS-backed datasets. When
+                omitted, the standard ``/sparql`` journal endpoint is used.
 
         Returns:
             Parsed SPARQL JSON response dict.
@@ -410,10 +480,14 @@ WHERE {
         Raises:
             requests.exceptions.HTTPError: On non-2xx responses.
         """
-        url = f'{self.prefix}://{self.server}:{self.port}/sparql'
-        response = requests.get(
+        if lds_uri:
+            encoded = urllib.parse.quote(lds_uri, safe='')
+            url = f'{self.prefix}://{self.server}:{self.port}/sparql/lds/{encoded}'
+        else:
+            url = f'{self.prefix}://{self.server}:{self.port}/sparql'
+        response = requests.post(
             url,
-            params={'query': query},
+            data={'query': query},
             headers={'accept': 'application/sparql-results+json'},
             auth=HTTPBasicAuth(self.username, self.password),
             timeout=self.REQUEST_TIMEOUT,
@@ -463,7 +537,7 @@ WHERE {
                 print(q['operationId'], q['datasource'])
         """
         logger.debug('Fetching in-flight queries from system tables')
-        result = self._send_sparql(self.INFLIGHT_QUERIES_SPARQL)
+        result = self._send_sparql(self.INFLIGHT_QUERIES_SPARQL, lds_uri=self.SYSTEM_TABLES_LDS_URI)
         bindings = result.get('results', {}).get('bindings', [])
         queries = [
             {
@@ -503,7 +577,7 @@ WHERE {
         """
         logger.info(f'Cancelling query operationId={operation_id} on datasource={datasource_uri}')
         payload = self._build_cancel_payload(datasource_uri, operation_id)
-        url = f'{self.prefix}://{self.server}:{self.port}/semantic-services'
+        url = f'{self.prefix}://{self.server}:{self.port}/anzoclient/call'
         try:
             response = requests.post(
                 url,
@@ -658,7 +732,7 @@ WHERE {
         # ------------------------------------------------------------------
         logger.info(f'Sending AZG restart request for datasource: {azg_uri}')
         payload = self._build_azg_reload_payload(azg_uri=azg_uri, force_reload=True)
-        url = f'{self.prefix}://{self.server}:{self.port}/semantic-services'
+        url = f'{self.prefix}://{self.server}:{self.port}/anzoclient/call'
         try:
             response = requests.post(
                 url,
