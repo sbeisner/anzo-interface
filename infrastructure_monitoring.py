@@ -330,6 +330,146 @@ def check_anzograph_connectivity(
 
 
 # =============================================================================
+# LDAP PERIODIC REVALIDATION
+# =============================================================================
+
+@dataclass
+class LDAPRevalidationReport:
+    """
+    Results of periodic LDAP revalidation over a time window.
+
+    Attributes:
+        checks_performed: Total number of authentication checks run.
+        checks_passed: Number that succeeded.
+        checks_failed: Number that failed.
+        failure_timestamps: ISO timestamps of each failure.
+        avg_response_time_ms: Average response time across all checks.
+        window_seconds: Total duration of the monitoring window.
+        interval_seconds: Time between checks.
+    """
+    checks_performed: int
+    checks_passed: int
+    checks_failed: int
+    failure_timestamps: list[str]
+    avg_response_time_ms: float
+    window_seconds: int
+    interval_seconds: int
+
+
+def monitor_ldap_authentication(
+    server: str,
+    username: str,
+    password: str,
+    window_seconds: int = 3600,
+    interval_seconds: int = 60,
+    port: str = '8443',
+    https: bool = True,
+    verify_ssl: bool = False,
+    on_failure: Optional[callable] = None,
+) -> LDAPRevalidationReport:
+    """
+    Periodically revalidate LDAP authentication over a defined time window.
+
+    Runs repeated authentication checks at a fixed interval and reports
+    any failures that occur during the window. Useful for detecting
+    transient LDAP connectivity issues or session expiry problems.
+
+    Args:
+        server: Anzo server hostname or IP address.
+        username: Username to authenticate.
+        password: Password for authentication.
+        window_seconds: Total duration to run checks (default: 3600 = 1 hour).
+        interval_seconds: Seconds between checks (default: 60).
+        port: Server port (default: '8443').
+        https: Use HTTPS if True (default: True).
+        verify_ssl: Verify SSL certificates (default: False).
+        on_failure: Optional callback ``fn(report: LDAPHealthReport)`` invoked
+            immediately when a check fails (e.g. to send an alert).
+
+    Returns:
+        :class:`LDAPRevalidationReport` summarising all checks performed.
+
+    Example — validate every 30 seconds for 10 minutes::
+
+        def alert(report):
+            print(f"LDAP FAILURE at {report.timestamp}: {report.error_message}")
+
+        result = monitor_ldap_authentication(
+            server='anzo.example.com',
+            username='sysadmin',
+            password='secret',
+            window_seconds=600,
+            interval_seconds=30,
+            on_failure=alert,
+        )
+        print(f"Passed {result.checks_passed}/{result.checks_performed} checks")
+    """
+    checks_performed = 0
+    checks_passed = 0
+    checks_failed = 0
+    failure_timestamps: list[str] = []
+    total_response_time_ms = 0.0
+
+    deadline = time.time() + window_seconds
+    logger.info(
+        f"Starting LDAP revalidation: window={window_seconds}s, interval={interval_seconds}s"
+    )
+
+    while time.time() < deadline:
+        report = check_ldap_authentication(
+            server=server,
+            username=username,
+            password=password,
+            port=port,
+            https=https,
+            verify_ssl=verify_ssl,
+        )
+        checks_performed += 1
+        total_response_time_ms += report.response_time_ms
+
+        if report.is_authenticated:
+            checks_passed += 1
+            logger.debug(f"LDAP check passed ({report.response_time_ms:.0f}ms)")
+        else:
+            checks_failed += 1
+            failure_timestamps.append(report.timestamp.isoformat())
+            logger.warning(
+                f"LDAP check failed: {report.error_message} "
+                f"(response time: {report.response_time_ms:.0f}ms)"
+            )
+            if on_failure:
+                try:
+                    on_failure(report)
+                except Exception as cb_err:
+                    logger.error(f"on_failure callback raised: {cb_err}")
+
+        # Sleep until next check, but don't overshoot the window
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval_seconds, remaining))
+
+    avg_response_time_ms = (
+        total_response_time_ms / checks_performed if checks_performed else 0.0
+    )
+
+    logger.info(
+        f"LDAP revalidation complete: {checks_passed}/{checks_performed} passed, "
+        f"avg response {avg_response_time_ms:.0f}ms"
+    )
+
+    return LDAPRevalidationReport(
+        checks_performed=checks_performed,
+        checks_passed=checks_passed,
+        checks_failed=checks_failed,
+        failure_timestamps=failure_timestamps,
+        avg_response_time_ms=avg_response_time_ms,
+        window_seconds=window_seconds,
+        interval_seconds=interval_seconds,
+    )
+
+
+# =============================================================================
 # COMPREHENSIVE INFRASTRUCTURE CHECK
 # =============================================================================
 
