@@ -4,7 +4,7 @@ Anzo Backend Monitoring Sidecar Service
 
 Exposes infrastructure metrics not available via the AGS REST API:
 - JVM heap and GC statistics (via jstat)
-- CPU and process-level metrics (via psutil)
+- CPU and process-level metrics (via psutil or /proc fallback)
 - Network interface statistics (via psutil)
 - Disk I/O statistics (via psutil)
 - Direct Elasticsearch cluster health
@@ -17,15 +17,38 @@ Run with:
 Or as a systemd service — see anzo-monitoring.service in this directory.
 
 Configuration via environment variables:
-    ES_HOST      Elasticsearch host:port (default: localhost:9200)
-    AZG_PORT     AnzoGraph port (default: 5600)
-    LDAP_SERVER  LDAP server URI (default: ldap://localhost:389)
-    LDAP_BASE_DN LDAP base DN (default: dc=example,dc=com)
-    API_KEY      If set, all requests must include X-API-Key header
+    ES_HOST           Elasticsearch host:port (default: localhost:9200)
+    AZG_PORT          AnzoGraph port (default: 5600)
+    LDAP_SERVER       LDAP server URI (default: ldap://localhost:389)
+    LDAP_BASE_DN      LDAP base DN (default: dc=example,dc=com)
+    API_KEY           If set, all requests must include X-API-Key header
+    ANZO_PROCESS_NAME Substring matched against cmdline args to find the Anzo
+                      JVM process (default: anzo.jar; use AnzoLauncher for
+                      install4j deployments)
+    JSTAT_PATH        Full path to jstat binary when not on PATH (default: jstat)
+    JSTAT_SUDO        Set to 'true' to prefix jstat with 'sudo -n', enabling
+                      GC stats when running as a non-root user with a narrow
+                      sudoers entry (see below)
+
+Running without root
+--------------------
+The Anzo JVM process is typically owned by root on install4j deployments.
+CPU and memory metrics fall back to reading /proc/{pid}/stat and
+/proc/{pid}/status, which are world-readable.
+
+JVM GC statistics (jstat) require ptrace-attach privileges. To enable
+these without running the full service as root, add a narrow sudoers rule:
+
+    # /etc/sudoers.d/anzo-monitor
+    Cmnd_Alias ANZO_JSTAT = /opt/i4j_jres/1.8.472/bin/jstat -gc *
+    monitoring_user ALL=(root) NOPASSWD: ANZO_JSTAT
+
+Then set JSTAT_SUDO=true when starting the service.
 """
 
 import os
 import subprocess
+import time
 from datetime import datetime
 from functools import wraps
 
@@ -49,6 +72,10 @@ ANZO_PROCESS_NAME = os.getenv('ANZO_PROCESS_NAME', 'anzo.jar')
 # (e.g. install4j bundles its own JRE at /opt/i4j_jres/<version>/bin/jstat).
 JSTAT_PATH = os.getenv('JSTAT_PATH', 'jstat')
 
+# JSTAT_SUDO: prefix jstat with 'sudo -n' so a non-root service user can attach
+# to a root-owned JVM. Requires a narrow sudoers rule — see module docstring.
+JSTAT_SUDO = os.getenv('JSTAT_SUDO', '').lower() in ('true', '1', 'yes')
+
 
 # ---------------------------------------------------------------------------
 # Optional API key authentication
@@ -67,15 +94,81 @@ def require_api_key(f):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_anzo_process():
-    """Return the psutil.Process for the running Anzo JVM, or None."""
+def _get_anzo_pid():
+    """Return the PID of the running Anzo JVM, or None."""
     for proc in psutil.process_iter(['pid', 'cmdline']):
         try:
-            if any(ANZO_PROCESS_NAME in (arg or '') for arg in proc.info['cmdline']):
-                return psutil.Process(proc.info['pid'])
+            if any(ANZO_PROCESS_NAME in (arg or '') for arg in (proc.info['cmdline'] or [])):
+                return proc.info['pid']
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return None
+
+
+def _proc_memory_mb(pid):
+    """Read resident memory from /proc/{pid}/status (world-readable, no root needed)."""
+    try:
+        with open(f'/proc/{pid}/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024  # KB -> MB
+    except OSError:
+        pass
+    return None
+
+
+def _proc_cpu_percent(pid, interval=1.0):
+    """
+    Compute CPU % for pid from /proc/{pid}/stat (world-readable, no root needed).
+    Takes two samples separated by interval seconds.
+    """
+    def _read_stat(pid):
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                fields = f.read().split()
+            utime = int(fields[13])
+            stime = int(fields[14])
+            with open('/proc/uptime') as f:
+                uptime = float(f.read().split()[0])
+            return utime + stime, uptime
+        except OSError:
+            return None, None
+
+    t1, up1 = _read_stat(pid)
+    if t1 is None:
+        return None
+    time.sleep(interval)
+    t2, up2 = _read_stat(pid)
+    if t2 is None:
+        return None
+
+    clk_tck = os.sysconf('SC_CLK_TCK')
+    elapsed = (up2 - up1) * clk_tck
+    if elapsed <= 0:
+        return 0.0
+    return round((t2 - t1) / elapsed * 100, 2)
+
+
+def _proc_num_threads(pid):
+    """Read thread count from /proc/{pid}/status (world-readable)."""
+    try:
+        with open(f'/proc/{pid}/status') as f:
+            for line in f:
+                if line.startswith('Threads:'):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
+def _proc_num_fds(pid):
+    """Count open file descriptors from /proc/{pid}/fd (may require same UID or root)."""
+    try:
+        return len(os.listdir(f'/proc/{pid}/fd'))
+    except PermissionError:
+        return None
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -90,18 +183,27 @@ def health():
 @app.route('/metrics/jvm')
 @require_api_key
 def get_jvm_metrics():
-    """JVM heap and GC statistics via jstat."""
-    proc = _get_anzo_process()
-    if not proc:
+    """
+    JVM heap and GC statistics via jstat.
+
+    Requires ptrace-attach to the Anzo JVM process. When running as a
+    non-root user, set JSTAT_SUDO=true and add a narrow sudoers rule:
+        Cmnd_Alias ANZO_JSTAT = /path/to/jstat -gc *
+        your_user ALL=(root) NOPASSWD: ANZO_JSTAT
+    """
+    pid = _get_anzo_pid()
+    if pid is None:
         return jsonify({'error': 'Anzo process not found'}), 404
 
+    cmd = (['sudo', '-n'] if JSTAT_SUDO else []) + [JSTAT_PATH, '-gc', str(pid)]
     try:
-        result = subprocess.run(
-            [JSTAT_PATH, '-gc', str(proc.pid)],
-            capture_output=True, text=True, timeout=5
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
-            return jsonify({'error': 'jstat failed', 'stderr': result.stderr}), 500
+            hint = ('Set JSTAT_SUDO=true and add a sudoers rule — see service docstring.'
+                    if 'permission' in result.stderr.lower() or 'attach' in result.stderr.lower()
+                    else '')
+            return jsonify({'error': 'jstat failed', 'stderr': result.stderr.strip(),
+                            'hint': hint}), 500
 
         headers = result.stdout.strip().split('\n')[0].split()
         values = result.stdout.strip().split('\n')[1].split()
@@ -137,21 +239,42 @@ def get_jvm_metrics():
 @app.route('/metrics/cpu')
 @require_api_key
 def get_cpu_metrics():
-    """CPU and process-level memory for the Anzo JVM process."""
-    proc = _get_anzo_process()
-    if not proc:
+    """
+    CPU and process-level memory for the Anzo JVM process.
+
+    Falls back to reading /proc/{pid}/stat and /proc/{pid}/status when
+    psutil raises AccessDenied (e.g. cross-UID process access). These
+    /proc files are world-readable and do not require root.
+    """
+    pid = _get_anzo_pid()
+    if pid is None:
         return jsonify({'error': 'Anzo process not found'}), 404
 
     try:
-        return jsonify({
-            'cpu_percent': proc.cpu_percent(interval=1.0),
-            'memory_mb': round(proc.memory_info().rss / 1024 / 1024, 2),
-            'num_threads': proc.num_threads(),
-            'num_fds': proc.num_fds() if hasattr(proc, 'num_fds') else None,
-            'timestamp': datetime.now().isoformat(),
-        })
+        proc = psutil.Process(pid)
+        cpu_pct = proc.cpu_percent(interval=1.0)
+        memory_mb = round(proc.memory_info().rss / 1024 / 1024, 2)
+        num_threads = proc.num_threads()
+        num_fds = proc.num_fds() if hasattr(proc, 'num_fds') else None
+        source = 'psutil'
+    except psutil.AccessDenied:
+        # Fall back to /proc — world-readable, no root required
+        cpu_pct = _proc_cpu_percent(pid)
+        memory_mb = _proc_memory_mb(pid)
+        num_threads = _proc_num_threads(pid)
+        num_fds = _proc_num_fds(pid)
+        source = '/proc'
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+    return jsonify({
+        'cpu_percent': cpu_pct,
+        'memory_mb': memory_mb,
+        'num_threads': num_threads,
+        'num_fds': num_fds,
+        'source': source,
+        'timestamp': datetime.now().isoformat(),
+    })
 
 
 @app.route('/metrics/network')
@@ -305,7 +428,7 @@ def get_all_metrics():
         ('disk', get_disk_metrics),
         ('elasticsearch', get_elasticsearch_health),
         ('anzograph', get_anzograph_metrics),
-    ]:
+    ]:  # type: ignore[assignment]
         try:
             resp = fn()
             result[name] = resp.get_json() if hasattr(resp, 'get_json') else resp[0].get_json()

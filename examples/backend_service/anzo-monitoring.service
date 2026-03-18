@@ -4,8 +4,17 @@ After=network.target
 
 [Service]
 Type=simple
-# Run as root so jstat and psutil can attach to the Anzo JVM process.
-# The Anzo Java process is typically owned by root on install4j deployments.
+# User: set to a dedicated monitoring user (e.g. 'anzo-monitor') or 'root'.
+#
+# Non-root operation:
+#   - CPU and memory fall back to /proc (world-readable, no privileges needed)
+#   - Network and disk I/O work without root
+#   - jstat (GC stats) needs ptrace-attach — add a narrow sudoers rule and
+#     set JSTAT_SUDO=true below. See the service docstring for the exact rule.
+#
+# Root operation (simplest, but least-privilege violation):
+#   - All endpoints work without any sudoers changes
+#   - Set User=root and remove JSTAT_SUDO
 User=root
 WorkingDirectory=/opt/anzo/monitoring
 ExecStart=/opt/anzo/monitoring/venv/bin/python3 /opt/anzo/monitoring/anzo_monitoring_service.py
@@ -24,6 +33,11 @@ Environment="ANZO_PROCESS_NAME=AnzoLauncher"
 # JSTAT_PATH: full path to jstat when not on system PATH.
 # install4j bundles its own JRE; find with: find /opt/i4j_jres -name jstat
 Environment="JSTAT_PATH=/opt/i4j_jres/1.8.472/bin/jstat"
+# JSTAT_SUDO=true: prefix jstat with 'sudo -n' for non-root users.
+# Requires sudoers rule:
+#   Cmnd_Alias ANZO_JSTAT = /opt/i4j_jres/1.8.472/bin/jstat -gc *
+#   your_user ALL=(root) NOPASSWD: ANZO_JSTAT
+# Environment="JSTAT_SUDO=true"
 # Uncomment to require API key authentication:
 # Environment="API_KEY=your-secret-key-here"
 
