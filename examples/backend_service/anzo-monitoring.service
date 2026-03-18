@@ -1,0 +1,22 @@
+[Unit]
+Description=Anzo Backend Monitoring Sidecar Service
+After=network.target
+
+[Service]
+Type=simple
+User=anzo
+WorkingDirectory=/opt/anzo/monitoring
+ExecStart=/opt/anzo/monitoring/venv/bin/python /opt/anzo/monitoring/anzo_monitoring_service.py
+Restart=always
+RestartSec=5
+
+# Configuration — update these for your environment
+Environment="ES_HOST=localhost:9200"
+Environment="AZG_PORT=5600"
+Environment="LDAP_SERVER=ldap://localhost:389"
+Environment="LDAP_BASE_DN=dc=example,dc=com"
+# Uncomment to require API key authentication:
+# Environment="API_KEY=your-secret-key-here"
+
+[Install]
+WantedBy=multi-user.target
