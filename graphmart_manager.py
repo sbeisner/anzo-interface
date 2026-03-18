@@ -461,6 +461,85 @@ WHERE {
         time.sleep(self.SLEEP_TIME)
 
     # -------------------------------------------------------------------------
+    # Ontology Inspection
+    # -------------------------------------------------------------------------
+
+    ONTOLOGY_CLASS_COUNT_SPARQL = """
+PREFIX owl: <http://www.w3.org/2002/07/owl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX dc: <http://purl.org/dc/elements/1.1/>
+PREFIX anzo: <http://openanzo.org/ontologies/2008/07/Anzo#>
+PREFIX tag: <http://cambridgesemantics.com/ontologies/Tags#>
+
+SELECT ?ont (COUNT(DISTINCT ?class) AS ?classCount)
+WHERE {
+  GRAPH ?ont {
+    ?ont a owl:Ontology ;
+         rdfs:label ?ontLabel .
+
+    FILTER (
+      NOT EXISTS { ?ont anzo:isSystem true } &&
+      NOT EXISTS { ?ont tag:tags ?tagUri . ?tagUri dc:title "Auto-Gen" } &&
+      NOT EXISTS { ?ont a anzo:SystemData } &&
+      NOT EXISTS { ?ont anzo:createdBy <http://openanzo.org/system/internal/sysadmin> }
+    )
+
+    ?class a owl:Class .
+  }
+}
+GROUP BY ?ont
+""".strip()
+
+    def get_ontology_class_counts(
+        self,
+        min_classes: int = 0,
+        sort_descending: bool = True,
+    ) -> list[dict]:
+        """Return user-created ontologies with their class counts.
+
+        Queries the Anzo journal for ontologies that are not system-generated,
+        auto-generated, or owned by sysadmin, and counts the ``owl:Class``
+        instances in each. Useful for identifying large or unexpectedly
+        populated ontologies.
+
+        Args:
+            min_classes: Only return ontologies with at least this many classes
+                (default: 0 = return all).
+            sort_descending: If True (default), sort by class count largest first.
+
+        Returns:
+            List of dicts, each with:
+
+            - ``ontology_uri`` (str): the ontology named graph URI
+            - ``class_count`` (int): number of ``owl:Class`` instances
+
+        Raises:
+            requests.exceptions.HTTPError: On SPARQL endpoint errors.
+
+        Example::
+
+            results = api.get_ontology_class_counts(min_classes=10)
+            for r in results:
+                print(f"{r['class_count']:>6}  {r['ontology_uri']}")
+        """
+        logger.debug('Fetching ontology class counts from journal')
+        result = self._send_sparql(self.ONTOLOGY_CLASS_COUNT_SPARQL)
+        bindings = result.get('results', {}).get('bindings', [])
+
+        rows = [
+            {
+                'ontology_uri': b['ont']['value'],
+                'class_count': int(b['classCount']['value']),
+            }
+            for b in bindings
+            if int(b['classCount']['value']) >= min_classes
+        ]
+
+        rows.sort(key=lambda r: r['class_count'], reverse=sort_descending)
+        logger.info(f'Found {len(rows)} ontologies with >= {min_classes} classes')
+        return rows
+
+    # -------------------------------------------------------------------------
     # In-Flight Query Cancellation
     # -------------------------------------------------------------------------
 
