@@ -473,6 +473,46 @@ sudo systemctl status anzo-monitoring
 
 The service listens on `localhost:9090` by default. Secure it with an API key if exposing beyond localhost — pass `api_key` to `BackendMonitoringClient` and set the `API_KEY` environment variable on the service.
 
+### Running without root
+
+The Anzo JVM process is typically owned by root on install4j deployments. The service handles this gracefully:
+
+| Endpoint | Non-root behaviour |
+|---|---|
+| `/metrics/cpu` | Falls back to `/proc/{pid}/stat` and `/proc/{pid}/status` — world-readable, no privileges needed. Response includes `"source": "/proc"`. |
+| `/metrics/jvm` | Requires ptrace-attach to the JVM. Returns a `hint` field in the error pointing to the sudoers fix (see below). |
+| `/metrics/network`, `/metrics/disk` | Host-level counters — no privileges needed. |
+| `/metrics/anzograph` | Port-level connection counts — no privileges needed. |
+
+**Enabling JVM GC stats without full root** — add a narrow sudoers rule and set `JSTAT_SUDO=true`:
+
+```bash
+# Find the jstat path (install4j bundles its own JRE)
+find /opt/i4j_jres -name jstat
+
+# Create sudoers rule (replace path and username as needed)
+sudo tee /etc/sudoers.d/anzo-monitor << 'EOF'
+Cmnd_Alias ANZO_JSTAT = /opt/i4j_jres/1.8.472/bin/jstat -gc *
+anzo-monitor ALL=(root) NOPASSWD: ANZO_JSTAT
+EOF
+```
+
+Then set in the systemd unit or environment:
+```
+Environment="JSTAT_SUDO=true"
+```
+
+### install4j deployments (Anzo 5.x standard)
+
+Standard Anzo 5.x installs use install4j which bundles its own JRE and names the launcher `AnzoLauncher`. Two environment variables must be set — add them to the systemd unit:
+
+```
+Environment="ANZO_PROCESS_NAME=AnzoLauncher"
+Environment="JSTAT_PATH=/opt/i4j_jres/1.8.472/bin/jstat"
+```
+
+To find the correct jstat path on any install4j deployment: `find /opt/i4j_jres -name jstat`
+
 ---
 
 ## Common Use Cases
