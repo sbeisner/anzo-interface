@@ -4,9 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=anzo
+# Run as root so jstat and psutil can attach to the Anzo JVM process.
+# The Anzo Java process is typically owned by root on install4j deployments.
+User=root
 WorkingDirectory=/opt/anzo/monitoring
-ExecStart=/opt/anzo/monitoring/venv/bin/python /opt/anzo/monitoring/anzo_monitoring_service.py
+ExecStart=/opt/anzo/monitoring/venv/bin/python3 /opt/anzo/monitoring/anzo_monitoring_service.py
 Restart=always
 RestartSec=5
 
@@ -15,6 +17,13 @@ Environment="ES_HOST=localhost:9200"
 Environment="AZG_PORT=5600"
 Environment="LDAP_SERVER=ldap://localhost:389"
 Environment="LDAP_BASE_DN=dc=example,dc=com"
+# ANZO_PROCESS_NAME: substring matched against process cmdline args.
+# Use 'AnzoLauncher' for install4j deployments (standard on Anzo 5.x).
+# Use 'anzo.jar' for manual/legacy deployments.
+Environment="ANZO_PROCESS_NAME=AnzoLauncher"
+# JSTAT_PATH: full path to jstat when not on system PATH.
+# install4j bundles its own JRE; find with: find /opt/i4j_jres -name jstat
+Environment="JSTAT_PATH=/opt/i4j_jres/1.8.472/bin/jstat"
 # Uncomment to require API key authentication:
 # Environment="API_KEY=your-secret-key-here"
 

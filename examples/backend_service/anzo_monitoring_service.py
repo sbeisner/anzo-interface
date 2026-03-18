@@ -41,7 +41,13 @@ LDAP_SERVER = os.getenv('LDAP_SERVER', 'ldap://localhost:389')
 LDAP_BASE_DN = os.getenv('LDAP_BASE_DN', 'dc=example,dc=com')
 API_KEY = os.getenv('API_KEY')
 
-ANZO_PROCESS_NAME = 'anzo.jar'
+# ANZO_PROCESS_NAME: substring matched against each cmdline argument of running processes.
+# Default 'anzo.jar' works for standard installs; set to 'AnzoLauncher' for install4j deployments.
+ANZO_PROCESS_NAME = os.getenv('ANZO_PROCESS_NAME', 'anzo.jar')
+
+# JSTAT_PATH: full path to jstat binary. Only needed when jstat is not on PATH
+# (e.g. install4j bundles its own JRE at /opt/i4j_jres/<version>/bin/jstat).
+JSTAT_PATH = os.getenv('JSTAT_PATH', 'jstat')
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +97,7 @@ def get_jvm_metrics():
 
     try:
         result = subprocess.run(
-            ['jstat', '-gc', str(proc.pid)],
+            [JSTAT_PATH, '-gc', str(proc.pid)],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode != 0:
