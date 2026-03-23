@@ -26,9 +26,9 @@ WHAT IS NOT AVAILABLE via any REST or SPARQL API
 AnzoGraph's internal cluster management uses gRPC (port 5600), not REST.
 There is no publicly documented REST or SPARQL endpoint for:
 
-  ✗  Per-node / per-worker memory utilization
-      → Requires a backend sidecar on each AZG node (see BACKEND_SERVICE_GUIDE.md)
-        or a commercial APM agent (Datadog, New Relic).
+  ✓  Per-node memory utilization — via ``get_anzograph_memory()``.
+      → Requires the backend sidecar running on the AZG node (reads /proc,
+        no root needed).  See README for sidecar setup.
 
   ✗  True intra-cluster interconnect bandwidth
       → The Admin Console has a network benchmark (UI only, not API-accessible).
@@ -99,6 +99,24 @@ class AnzoGraphThroughputReport:
     # NOTE: This measures result-set delivery speed from AZG to the
     # calling host (Anzo or this script). It is NOT equivalent to
     # intra-cluster interconnect bandwidth.
+    timestamp: datetime
+
+
+@dataclass
+class AnzoGraphMemoryReport:
+    """Memory consumption of the AnzoGraph process, read via the backend sidecar.
+
+    Obtained by calling GET /metrics/cpu on the monitoring sidecar deployed on
+    the AnzoGraph node.  The sidecar reads /proc/{pid}/status (world-readable)
+    so it works without root access.
+    """
+    host: str
+    sidecar_port: int
+    memory_mb: Optional[float]
+    cpu_percent: Optional[float]
+    num_threads: Optional[int]
+    source: str            # e.g. "psutil" or "/proc"
+    error_message: Optional[str]
     timestamp: datetime
 
 
@@ -360,5 +378,88 @@ def measure_anzograph_throughput(
         return AnzoGraphThroughputReport(
             host=host, port=port,
             rows_fetched=0, elapsed_ms=0.0, rows_per_second=0.0,
+            timestamp=datetime.now(),
+        )
+
+
+def get_anzograph_memory(
+    host: str,
+    sidecar_port: int = 5000,
+    use_https: bool = False,
+    timeout: int = 10,
+    verify_ssl: bool = False,
+) -> AnzoGraphMemoryReport:
+    """Return current memory consumption of the AnzoGraph process.
+
+    Calls ``GET /metrics/cpu`` on the monitoring sidecar deployed on the
+    AnzoGraph node.  The sidecar reads ``/proc/{pid}/status`` (world-readable),
+    so it works without root access on the AZG host.
+
+    Prerequisites:
+        The backend monitoring sidecar (``anzo_monitoring_service.py``) must be
+        running on the AnzoGraph node and reachable from the caller.  The
+        sidecar automatically discovers the AnzoGraph process by the name
+        configured in its ``ANZO_PROCESS_NAME`` environment variable.
+
+    Args:
+        host:         Hostname or IP of the AnzoGraph node.
+        sidecar_port: Port the monitoring sidecar listens on (default 5000).
+        use_https:    Use HTTPS to reach the sidecar.
+        timeout:      Request timeout in seconds.
+        verify_ssl:   Verify SSL certificate when ``use_https=True``.
+
+    Returns:
+        AnzoGraphMemoryReport
+
+    Example::
+
+        report = get_anzograph_memory("azg-host.example.com")
+        if report.error_message:
+            print(f"Could not fetch memory: {report.error_message}")
+        else:
+            print(f"AnzoGraph memory: {report.memory_mb:.0f} MB ({report.source})")
+    """
+    scheme = "https" if use_https else "http"
+    url = f"{scheme}://{host}:{sidecar_port}/metrics/cpu"
+
+    try:
+        response = requests.get(url, timeout=timeout, verify=verify_ssl)
+        response.raise_for_status()
+        data = response.json()
+
+        if "error" in data:
+            return AnzoGraphMemoryReport(
+                host=host, sidecar_port=sidecar_port,
+                memory_mb=None, cpu_percent=None, num_threads=None,
+                source="sidecar",
+                error_message=data["error"],
+                timestamp=datetime.now(),
+            )
+
+        return AnzoGraphMemoryReport(
+            host=host,
+            sidecar_port=sidecar_port,
+            memory_mb=data.get("memory_mb"),
+            cpu_percent=data.get("cpu_percent"),
+            num_threads=data.get("num_threads"),
+            source=data.get("source", "sidecar"),
+            error_message=None,
+            timestamp=datetime.now(),
+        )
+
+    except requests.exceptions.ConnectionError:
+        return AnzoGraphMemoryReport(
+            host=host, sidecar_port=sidecar_port,
+            memory_mb=None, cpu_percent=None, num_threads=None,
+            source="sidecar",
+            error_message=f"Connection refused — is the sidecar running on {host}:{sidecar_port}?",
+            timestamp=datetime.now(),
+        )
+    except Exception as e:
+        return AnzoGraphMemoryReport(
+            host=host, sidecar_port=sidecar_port,
+            memory_mb=None, cpu_percent=None, num_threads=None,
+            source="sidecar",
+            error_message=str(e),
             timestamp=datetime.now(),
         )
