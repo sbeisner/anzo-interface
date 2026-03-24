@@ -438,4 +438,9 @@ def get_all_metrics():
 
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=9090, debug=False)
+    port = int(os.environ.get('SERVICE_PORT', 9090))
+    # Bind to 0.0.0.0 so the service is reachable from outside the container
+    # in Docker/Kubernetes deployments. For host-only deployments you can
+    # restrict this to 127.0.0.1 via the BIND_HOST environment variable.
+    bind_host = os.environ.get('BIND_HOST', '0.0.0.0')
+    app.run(host=bind_host, port=port, debug=False)
