@@ -1,0 +1,8 @@
+# Docker / Kubernetes sidecar dependencies
+# Uses Python 3.9+ so no Flask/Werkzeug pinning needed.
+flask>=2.3,<3.1
+psutil>=5.9
+requests>=2.28
+# python-ldap is optional — remove if LDAP group check endpoint not needed.
+# Requires libldap2-dev; add to Dockerfile apt-get if keeping this.
+# python-ldap==3.4.4

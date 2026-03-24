@@ -1,0 +1,63 @@
+# Patch to add the anzo-monitor sidecar to an existing AnzoGraph deployment.
+#
+# Apply with:
+#   kubectl patch deployment <anzograph-deployment> \
+#     --patch-file k8s-sidecar-patch.yaml \
+#     -n <namespace>
+#
+# This triggers a rolling update — a new pod is created (with the sidecar)
+# before the old one is terminated, so AnzoGraph stays available.
+#
+# BEFORE APPLYING:
+#   1. Build and push the sidecar image (see Dockerfile in this directory):
+#        docker build -t your-registry/anzo-monitor:latest .
+#        docker push your-registry/anzo-monitor:latest
+#   2. Replace 'your-registry/anzo-monitor:latest' below with the actual image.
+#   3. Verify the correct ANZO_PROCESS_NAME by checking:
+#        kubectl exec -it <existing-pod> -- ps aux | grep -i anzo
+
+spec:
+  template:
+    spec:
+      # Required: lets the sidecar see AnzoGraph's processes via /proc.
+      # Without this, psutil and /proc find nothing useful.
+      shareProcessNamespace: true
+
+      containers:
+        - name: anzo-monitor
+          image: your-registry/anzo-monitor:latest
+          imagePullPolicy: Always
+          ports:
+            - name: monitor
+              containerPort: 9090
+          env:
+            - name: ANZO_PROCESS_NAME
+              value: "AnzoLauncher"
+            - name: SERVICE_PORT
+              value: "9090"
+            # Optional: set to 'true' and add SYS_PTRACE capability for JVM GC stats
+            - name: JSTAT_SUDO
+              value: "false"
+            # Optional: restrict access with an API key
+            # - name: API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: anzo-monitor-secret
+            #       key: api-key
+          securityContext:
+            # Required for jstat (/metrics/jvm). Remove if JVM metrics not needed.
+            capabilities:
+              add: ["SYS_PTRACE"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

@@ -1,0 +1,20 @@
+# Kubernetes Service exposing the anzo-monitor sidecar within the cluster.
+#
+# Apply with:
+#   kubectl apply -f k8s-monitor-service.yaml -n <namespace>
+#
+# Replace the selector label to match your AnzoGraph deployment's pod labels.
+# Check with: kubectl get pods --show-labels | grep anzograph
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: anzo-monitor
+spec:
+  selector:
+    app: anzograph        # <-- replace with your actual pod label
+  ports:
+    - name: monitor
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
