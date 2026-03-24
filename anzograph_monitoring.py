@@ -58,7 +58,7 @@ _PING_QUERY = "SELECT (1 AS ?ping) WHERE {}"
 
 # Throughput probe: pull a bounded result set to measure rows/second.
 # Callers can substitute their own query for a domain-relevant measurement.
-_THROUGHPUT_QUERY = "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT {limit}"
+_THROUGHPUT_QUERY = "SELECT ?s ?p ?o WHERE {{ ?s ?p ?o }} LIMIT {limit}"
 
 
 @dataclass
