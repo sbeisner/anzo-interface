@@ -12,7 +12,7 @@ import time
 import urllib.parse
 import uuid
 from datetime import timedelta
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -284,12 +284,14 @@ WHERE {
                     f'{status_graph["dirtyLayers"]} dirty layers')
         for layer in status_graph['childLayer']:
             if layer['enabled']:
-                if error := layer.get('error'):
+                error = layer.get('error')
+                if error:
                     logger.info(f'Layer [ {layer["title"]} ] failed with error:\n'
                                 f'{os.linesep.join(error.split(os.linesep)[:5])}...')
                     for step in layer['child']:
                         if step['enabled']:
-                            if error := step.get('error'):
+                            error = step.get('error')
+                            if error:
                                 logger.info(f'Step [ {layer["title"]} ] failed with error:\n'
                                             f'{os.linesep.join(error.split(os.linesep)[:5])}...')
         return {'failedLayers': status_graph['failedLayers'], 'dirtyLayers': status_graph['dirtyLayers']}
@@ -494,7 +496,7 @@ GROUP BY ?ont
         self,
         min_classes: int = 0,
         sort_descending: bool = True,
-    ) -> list[dict]:
+    ) -> List[Dict]:
         """Return user-created ontologies with their class counts.
 
         Queries the Anzo journal for ontologies that are not system-generated,
@@ -595,7 +597,7 @@ GROUP BY ?ont
             operation_id=operation_id,
         )
 
-    def get_inflight_queries(self) -> list[dict]:
+    def get_inflight_queries(self) -> List[Dict]:
         """Return all currently executing queries from the Anzo system tables.
 
         Queries the InflightQueries system graph via SPARQL and returns a list
@@ -746,7 +748,7 @@ GROUP BY ?ont
     def restart_anzograph(
         self,
         azg_uri: str,
-        graphmart_uris: Optional[list[str]] = None,
+        graphmart_uris: Optional[List[str]] = None,
         deactivate_timeout: int = 120,
         ready_timeout: int = 1800,
     ) -> None:

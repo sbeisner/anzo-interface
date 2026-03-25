@@ -28,7 +28,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -43,7 +43,7 @@ class ElasticsearchHealthReport:
     """Health report for Elasticsearch connectivity inferred from graphmart status."""
     is_healthy: bool
     failed_es_layers: int
-    error_messages: list[str]
+    error_messages: List[str]
     timestamp: datetime
 
 
@@ -350,7 +350,7 @@ class LDAPRevalidationReport:
     checks_performed: int
     checks_passed: int
     checks_failed: int
-    failure_timestamps: list[str]
+    failure_timestamps: List[str]
     avg_response_time_ms: float
     window_seconds: int
     interval_seconds: int
@@ -407,7 +407,7 @@ def monitor_ldap_authentication(
     checks_performed = 0
     checks_passed = 0
     checks_failed = 0
-    failure_timestamps: list[str] = []
+    failure_timestamps: List[str] = []
     total_response_time_ms = 0.0
 
     deadline = time.time() + window_seconds
@@ -475,7 +475,7 @@ def monitor_ldap_authentication(
 
 def run_infrastructure_health_check(
     api: GraphmartManagerApi,
-    graphmart_uris: list[str],
+    graphmart_uris: List[str],
     check_ldap: bool = True
 ) -> dict:
     """

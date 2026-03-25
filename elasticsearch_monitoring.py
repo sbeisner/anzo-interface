@@ -23,7 +23,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -68,7 +68,7 @@ class ESNodeMemoryReport:
 @dataclass
 class ESNodesReport:
     """Aggregated per-node memory report from GET /_nodes/stats/jvm,os."""
-    nodes: list[ESNodeMemoryReport]
+    nodes: List[ESNodeMemoryReport]
     # Convenience aggregates across all nodes
     total_heap_used_mb: float
     total_heap_max_mb: float
@@ -97,7 +97,7 @@ class ESConnectivityReport:
     is_reachable: bool
     cluster_health: Optional[ESClusterHealthReport]
     nodes: Optional[ESNodesReport]
-    indices: list[ESIndexReport] = field(default_factory=list)
+    indices: List[ESIndexReport] = field(default_factory=list)
     overall_healthy: bool = False
     error_message: Optional[str] = None
     timestamp: datetime = field(default_factory=datetime.now)
@@ -125,7 +125,7 @@ class _ESClient:
         self.timeout = timeout
         self.verify_ssl = verify_ssl
 
-    def get(self, path: str, **params) -> tuple[requests.Response, float]:
+    def get(self, path: str, **params) -> Tuple[requests.Response, float]:
         start = time.perf_counter()
         response = requests.get(
             f"{self.base_url}{path}",
@@ -234,7 +234,7 @@ def check_node_memory(
     response, _ = client.get("/_nodes/stats/jvm,os")
     data = response.json()
 
-    node_reports: list[ESNodeMemoryReport] = []
+    node_reports: List[ESNodeMemoryReport] = []
     for node_id, node in data.get("nodes", {}).items():
         jvm = node.get("jvm", {}).get("mem", {})
         os_mem = node.get("os", {}).get("mem", {})
@@ -278,7 +278,7 @@ def check_indices(
     password: Optional[str] = None,
     timeout: int = 15,
     verify_ssl: bool = False,
-) -> list[ESIndexReport]:
+) -> List[ESIndexReport]:
     """List indices and validate each is queryable.
 
     Calls GET /_cat/indices (JSON format) and then issues a lightweight
@@ -312,7 +312,7 @@ def check_indices(
     if index_filter:
         raw_indices = [i for i in raw_indices if index_filter in i.get("index", "")]
 
-    results: list[ESIndexReport] = []
+    results: List[ESIndexReport] = []
     for idx in raw_indices:
         index_name = idx.get("index", "")
         doc_count = int(idx.get("docs.count") or 0)

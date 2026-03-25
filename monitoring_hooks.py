@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from graphmart_manager import GraphmartManagerApi, GraphmartManagerApiException
 
@@ -173,7 +173,7 @@ def check_graphmart_health(
 def get_layer_status(
     api: GraphmartManagerApi,
     graphmart_uri: str
-) -> list[LayerStatusReport]:
+) -> List[LayerStatusReport]:
     """
     Get status information for all layers in a graphmart.
 
@@ -212,7 +212,7 @@ def get_layer_status(
 
 def monitor_graphmarts(
     api: GraphmartManagerApi,
-    graphmart_uris: list[str],
+    graphmart_uris: List[str],
     interval: int = 60,
     duration: Optional[int] = None,
     callback: Optional[Callable[[GraphmartStatusReport], None]] = None

@@ -16,6 +16,7 @@ Configuration:
 import logging
 import sys
 from dataclasses import dataclass
+from typing import List
 
 from graphmart_manager import GraphmartManagerApi, GraphmartManagerApiException
 
@@ -62,7 +63,7 @@ GRAPHMARTS = [
 
 def reload_graphmarts_sequential(
     api: GraphmartManagerApi,
-    graphmarts: list[GraphmartConfig],
+    graphmarts: List[GraphmartConfig],
 ) -> None:
     """
     Reload graphmarts sequentially, waiting for each to complete before starting the next.

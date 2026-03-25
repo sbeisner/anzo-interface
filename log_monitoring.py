@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def _parse_log_timestamp(line: str) -> Optional[datetime]:
 # Log file reading — local and remote
 # ---------------------------------------------------------------------------
 
-def _read_local_log(path: str) -> list[str]:
+def _read_local_log(path: str) -> List[str]:
     """Read a local log file and return its lines."""
     return Path(path).read_text(errors='replace').splitlines()
 
@@ -88,7 +88,7 @@ def _read_remote_log(
     ssh_key_path: Optional[str] = None,
     ssh_password: Optional[str] = None,
     ssh_port: int = 22,
-) -> list[str]:
+) -> List[str]:
     """
     Read a remote log file via SSH using paramiko.
 
@@ -132,15 +132,15 @@ def _read_remote_log(
 
 
 def _collect_lines(
-    log_paths: list[str],
+    log_paths: List[str],
     ssh_host: Optional[str] = None,
     ssh_user: Optional[str] = None,
     ssh_key_path: Optional[str] = None,
     ssh_password: Optional[str] = None,
     ssh_port: int = 22,
-) -> list[str]:
+) -> List[str]:
     """Collect lines from one or more log files (local or remote)."""
-    all_lines: list[str] = []
+    all_lines: List[str] = []
     for path in log_paths:
         try:
             if ssh_host:
@@ -170,7 +170,7 @@ def _collect_lines(
 # Patterns that indicate LDAP-related failures in Anzo's log output.
 # These cover Java LDAP stack traces, Anzo's own LDAP classes, and generic
 # LDAP error strings that appear in Log4j output.
-_LDAP_EXCEPTION_PATTERNS: list[re.Pattern] = [
+_LDAP_EXCEPTION_PATTERNS: List[re.Pattern] = [
     re.compile(r'javax\.naming\.(NamingException|CommunicationException|AuthenticationException)', re.IGNORECASE),
     re.compile(r'com\.unboundid\.ldap', re.IGNORECASE),
     re.compile(r'ldap.*(exception|error|fail|timeout|refused|unreachable)', re.IGNORECASE),
@@ -195,22 +195,22 @@ class LdapExceptionReport:
         scan_timestamp: When the scan was performed.
     """
     exception_count: int
-    exceptions: list[dict]
+    exceptions: List[Dict]
     window_start: datetime
     window_end: datetime
-    log_paths: list[str]
+    log_paths: List[str]
     scan_timestamp: datetime = field(default_factory=datetime.now)
 
 
 def scan_ldap_exceptions(
     window_minutes: int = 60,
-    log_paths: Optional[list[str]] = None,
+    log_paths: Optional[List[str]] = None,
     ssh_host: Optional[str] = None,
     ssh_user: Optional[str] = None,
     ssh_key_path: Optional[str] = None,
     ssh_password: Optional[str] = None,
     ssh_port: int = 22,
-    extra_patterns: Optional[list[re.Pattern]] = None,
+    extra_patterns: Optional[List[re.Pattern]] = None,
 ) -> LdapExceptionReport:
     """
     Scan Anzo server logs for LDAP-related exceptions within a time window.
@@ -267,7 +267,7 @@ def scan_ldap_exceptions(
         ssh_port=ssh_port,
     )
 
-    exceptions: list[dict] = []
+    exceptions: List[Dict] = []
     current_ts: Optional[datetime] = None
 
     for line in all_lines:
@@ -307,7 +307,7 @@ def scan_ldap_exceptions(
 # Patterns that identify the authenticated user in Anzo log lines.
 # Anzo logs SPARQL requests with the username in several formats depending
 # on the component (REST API access log, audit logger, AnzoGraph proxy).
-_USER_PATTERNS: list[re.Pattern] = [
+_USER_PATTERNS: List[re.Pattern] = [
     re.compile(r'\buser[=:](\S+)', re.IGNORECASE),
     re.compile(r'\bprincipal[=:](\S+)', re.IGNORECASE),
     re.compile(r'\busername[=:](\S+)', re.IGNORECASE),
@@ -315,7 +315,7 @@ _USER_PATTERNS: list[re.Pattern] = [
 ]
 
 # Only count lines that reference AnzoGraph (to filter out non-AZG activity).
-_ANZOGRAPH_PATTERNS: list[re.Pattern] = [
+_ANZOGRAPH_PATTERNS: List[re.Pattern] = [
     re.compile(r'anzograph', re.IGNORECASE),
     re.compile(r'graphmart', re.IGNORECASE),
     re.compile(r'/sparql/graphmart/', re.IGNORECASE),
@@ -339,23 +339,23 @@ class AnzoGraphUserActivityReport:
         scan_timestamp: When the scan was performed.
     """
     unique_user_count: int
-    users: set[str]
+    users: set
     query_count: int
     window_start: datetime
     window_end: datetime
-    log_paths: list[str]
+    log_paths: List[str]
     scan_timestamp: datetime = field(default_factory=datetime.now)
 
 
 def scan_anzograph_user_activity(
     window_minutes: int = 60,
-    log_paths: Optional[list[str]] = None,
+    log_paths: Optional[List[str]] = None,
     ssh_host: Optional[str] = None,
     ssh_user: Optional[str] = None,
     ssh_key_path: Optional[str] = None,
     ssh_password: Optional[str] = None,
     ssh_port: int = 22,
-    extra_user_patterns: Optional[list[re.Pattern]] = None,
+    extra_user_patterns: Optional[List[re.Pattern]] = None,
 ) -> AnzoGraphUserActivityReport:
     """
     Count unique users accessing AnzoGraph within a time window by parsing logs.
@@ -422,7 +422,7 @@ def scan_anzograph_user_activity(
         ssh_port=ssh_port,
     )
 
-    users: set[str] = set()
+    users: set = field(default_factory=set)
     query_count = 0
     current_ts: Optional[datetime] = None
 

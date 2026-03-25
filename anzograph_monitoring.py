@@ -46,7 +46,7 @@ import statistics
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -133,7 +133,7 @@ def _sparql_get(
     password: Optional[str] = None,
     timeout: int = 30,
     verify_ssl: bool = False,
-) -> tuple[requests.Response, float]:
+) -> Tuple[requests.Response, float]:
     """Issue a SPARQL GET and return (response, elapsed_ms)."""
     scheme = "https" if use_https else "http"
     url = f"{scheme}://{host}:{port}/sparql"
@@ -269,7 +269,7 @@ def measure_anzograph_latency(
         print(f"Median latency: {report.median_ms:.1f}ms")
         print(f"p99 proxy (max): {report.max_ms:.1f}ms")
     """
-    samples: list[float] = []
+    samples: List[float] = []
     failed = 0
 
     for i in range(num_probes):

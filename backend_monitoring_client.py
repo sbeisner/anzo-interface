@@ -25,7 +25,7 @@ Usage:
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import requests
 
@@ -115,7 +115,7 @@ class LDAPGroupCheck:
     username: str
     group: str
     is_member: bool
-    all_groups: list[str]
+    all_groups: List[str]
     timestamp: datetime
 
 
