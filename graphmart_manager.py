@@ -61,21 +61,18 @@ class GraphmartManagerApi:
         system:datasource <{azg_uri}> ;
         graphmarts:forceReload "{force_reload}"^^xsd:boolean .
 }}"""
-    INFLIGHT_QUERIES_SPARQL = """
-SELECT ?operationId ?datasource
-WHERE {
-    ?query <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ;
-           <http://openanzo.org/ontologies/2008/07/System#datasource> ?datasource .
-}
-""".strip()
-
     # Linked dataset catalog entry for Anzo system tables (AnzoXray @ SystemTables).
-    # Used by get_inflight_queries() via /sparql/lds/{encoded_uri}.
+    # Used by query_system_table() and get_inflight_queries() via /sparql/lds/{encoded_uri}.
+    # This value is already percent-encoded; _send_sparql will encode it once more when
+    # building the URL path — matching the double-encoding that pyanzo uses.
     SYSTEM_TABLES_LDS_URI = (
         'http://openanzo.org/catEntry('
         '%5Bhttp%3A%2F%2Fcambridgesemantics.com%2Fontologies%2F2009%2F05%2FLinkedData%23AnzoXray%5D'
         '%40%5Bhttp%3A%2F%2Fcambridgesemantics.com%2Fdatasource%2FSystemTables%5D)'
     )
+
+    # Wildcard graph URI that tells the LDS endpoint to query all named graphs.
+    _ALL_NAMED_GRAPHS_URI = 'http://openanzo.org/namedGraphs/reserved/graphs/ALL'
 
     CANCEL_PAYLOAD_TEMPLATE = """\
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -564,11 +561,20 @@ GROUP BY ?ont
         if lds_uri:
             encoded = urllib.parse.quote(lds_uri, safe='')
             url = f'{self.prefix}://{self.server}:{self.port}/sparql/lds/{encoded}'
+            # The LDS endpoint requires format + graph scope parameters in addition
+            # to the query.  Without these the server returns HTTP 400.
+            data = {
+                'query': query,
+                'format': 'text/json',
+                'default-graph-uri': self._ALL_NAMED_GRAPHS_URI,
+                'named-graph-uri': self._ALL_NAMED_GRAPHS_URI,
+            }
         else:
             url = f'{self.prefix}://{self.server}:{self.port}/sparql'
+            data = {'query': query}
         response = requests.post(
             url,
-            data={'query': query},
+            data=data,
             headers={'accept': 'application/sparql-results+json'},
             auth=HTTPBasicAuth(self.username, self.password),
             timeout=self.REQUEST_TIMEOUT,
@@ -597,25 +603,90 @@ GROUP BY ?ont
             operation_id=operation_id,
         )
 
-    def get_inflight_queries(self) -> List[Dict]:
-        """Return all currently executing queries from the Anzo system tables.
+    def query_system_table(self, sparql: str) -> List[Dict]:
+        """Execute a SPARQL SELECT query against the Anzo system tables.
 
-        Queries the InflightQueries system graph via SPARQL and returns a list
-        of dicts, each containing ``operationId`` and ``datasource`` strings
-        that can be passed directly to :meth:`cancel_query`.
+        Sends the query to the SystemTables LDS endpoint
+        (``/sparql/lds/{encoded_lds_uri}``).  Use this for any query that
+        needs access to Anzo's internal system graphs (inflight queries,
+        statistics, transactions, etc.).
+
+        Note:
+            The ``TABLE "stc_*"`` syntax from Anzo's UI SPARQL editor is NOT
+            supported through this REST endpoint (returns HTTP 400 / Glitter
+            exception).  Use predicate-based SPARQL patterns instead — see
+            :meth:`get_inflight_queries` and :attr:`INFLIGHT_QUERIES_SPARQL`
+            for the correct approach.
+
+        Args:
+            sparql: Standard SPARQL SELECT query targeting system graph subjects.
 
         Returns:
-            List of dicts with keys ``operationId`` and ``datasource``.
-            Returns an empty list when no queries are in flight.
+            List of dicts, one per result row, keyed by variable name.
 
         Raises:
-            requests.exceptions.HTTPError: On SPARQL endpoint errors.
+            requests.exceptions.HTTPError: On non-2xx responses.
 
         Example::
 
-            queries = api.get_inflight_queries()
-            for q in queries:
-                print(q['operationId'], q['datasource'])
+            rows = api.query_system_table(
+                'SELECT ?operationId ?userName ?dateCreated WHERE { '
+                '    ?q <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#userName> ?userName ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#dateCreated> ?dateCreated . '
+                '    FILTER(CONTAINS(STR(?q), "inflightQueries")) '
+                '}'
+            )
+            for row in rows:
+                print(row)
+        """
+        logger.debug('Querying system tables')
+        result = self._send_sparql(sparql, lds_uri=self.SYSTEM_TABLES_LDS_URI)
+        bindings = result.get('results', {}).get('bindings', [])
+        return [
+            {k: v['value'] for k, v in row.items()}
+            for row in bindings
+        ]
+
+    # In-flight queries live at http://inflightQueries#(<operationId>) subjects.
+    # The datasource is stored under system:datasourceUri (NOT system:datasource).
+    INFLIGHT_QUERIES_SPARQL = """
+SELECT ?operationId ?datasource
+WHERE {
+    ?query <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ;
+           <http://openanzo.org/ontologies/2008/07/System#datasourceUri> ?datasource .
+    FILTER(CONTAINS(STR(?query), "inflightQueries"))
+}
+""".strip()
+
+    def get_inflight_queries(self) -> List[Dict]:
+        """Return all currently executing queries from the Anzo system tables.
+
+        Queries the ``inflightQueries`` system graph and returns a list of dicts.
+        Each dict contains ``operationId`` and ``datasource`` which can be
+        passed directly to :meth:`cancel_query`.
+
+        For richer detail (query text, user, start time) use
+        :meth:`query_system_table` directly::
+
+            rows = api.query_system_table(
+                'SELECT ?operationId ?datasource ?originalQuery ?userName ?dateCreated '
+                'WHERE { '
+                '    ?q <http://openanzo.org/ontologies/2008/07/System#operationId> ?operationId ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#datasourceUri> ?datasource ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#originalQuery> ?originalQuery ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#userName> ?userName ; '
+                '       <http://openanzo.org/ontologies/2008/07/System#dateCreated> ?dateCreated . '
+                '    FILTER(CONTAINS(STR(?q), "inflightQueries")) '
+                '}'
+            )
+
+        Returns:
+            List of dicts with keys ``operationId`` and ``datasource``.
+            Returns an empty list when no queries are running.
+
+        Raises:
+            requests.exceptions.HTTPError: On SPARQL endpoint errors.
         """
         logger.debug('Fetching in-flight queries from system tables')
         result = self._send_sparql(self.INFLIGHT_QUERIES_SPARQL, lds_uri=self.SYSTEM_TABLES_LDS_URI)
@@ -638,15 +709,25 @@ GROUP BY ?ont
         privileges; raises :class:`GraphmartManagerApiException` if the
         caller lacks permission or the query has already completed.
 
+        Note:
+            This targets the AnzoGraph GQE datasource — it cancels queries
+            running against AnzoGraph-backed graphmarts.  Queries issued
+            directly against the journal SPARQL endpoint
+            (``datasource == systemDatasource``) cannot be cancelled this way
+            and will return HTTP 500.
+
         Args:
             datasource_uri: Datasource URI of the running query
-                (from :meth:`get_inflight_queries`).
+                (from :meth:`get_inflight_queries`).  For AnzoGraph queries
+                this will be a GQE datasource URI like
+                ``http://cambridgesemantics.com/GqeDatasource/...``.
             operation_id: Operation ID of the running query
                 (from :meth:`get_inflight_queries`).
 
         Raises:
             GraphmartManagerApiException: If cancellation is rejected
-                (e.g. insufficient privileges, query already finished).
+                (e.g. insufficient privileges, query already finished,
+                or ``datasource_uri`` is not an AnzoGraph datasource).
             requests.exceptions.HTTPError: On unexpected HTTP errors.
 
         Example::
